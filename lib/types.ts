@@ -1,9 +1,9 @@
 export type Restaurant = { id: string; name: string; cuisine: string; address: string; source: string; selected: number; position: number; count?: number };
 export type Vote = { nickname: string; candidate_id: string; created_at: string };
-export type FoodOrder = { id: string; nickname: string; dish: string; quantity: number; note: string; status: 'pending' | 'claimed' | 'delivered'; claimant_name: string | null; isMine: boolean; canManage: boolean; created_at: string };
+export type FoodOrder = { id: string; nickname: string; dish: string; quantity: number; note: string; status: 'pending' | 'claimed' | 'delivered'; revision: number; claimant_name: string | null; isMine: boolean; isCarrier: boolean; canManage: boolean; created_at: string };
 export type VotingMode = 'random' | 'manual';
 export type MealLifecycle = { phase: 'voting' | 'delivery' | 'finished'; decided_at: string | null; delivery_deadline_at: string | null; completed_at: string | null; completion_reason: 'delivered' | 'timeout' | null };
-export type Room = MealLifecycle & { id: string; title: string; status: string; mode: VotingMode; winner_id: string | null; created_at: string; revision: number; isHost: boolean; inHistory: boolean; candidates: Restaurant[]; votes: Vote[]; myVote: Vote | null; total: number; orders: FoodOrder[] };
-export type Catalog = { restaurants: Restaurant[]; rooms: (MealLifecycle & { id: string; title: string; status: string; mode: VotingMode })[] };
+export type Room = MealLifecycle & { id: string; title: string; status: string; mode: VotingMode; winner_id: string | null; created_at: string; revision: number; isHost: boolean; inHistory: boolean; preferred_nickname: string; candidates: Restaurant[]; votes: Vote[]; myVote: Vote | null; total: number; orders: FoodOrder[] };
+export type Catalog = { restaurants: Restaurant[]; rooms: (MealLifecycle & { id: string; title: string; status: string; mode: VotingMode })[]; activeRooms: HistoryRoom[]; activeRoomCount: number };
 export type HistoryRoom = MealLifecycle & { id: string; title: string; status: string; mode: VotingMode; isHost: boolean; created_at: string; deleted_at: string | null; winner_name: string | null; vote_count: number; order_count: number };
 export type HistoryPage = { rooms: HistoryRoom[]; nextCursor: string | null };

@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowRight, History, Loader2, RotateCcw, Soup, Trash2, Undo2
 import { Button } from '@/components/ui/button';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import type { HistoryPage, HistoryRoom } from '@/lib/types';
+import { ReplayButton } from '@/components/replay-button';
 import { MealStatus } from '@/components/meal-status';
 
 async function request<T>(url: string, payload?: Record<string, unknown>): Promise<T> {
@@ -97,6 +98,7 @@ export default function HistoryView() {
           </div>
           <div className="history-actions">{trash ? <Button variant="outline" className="secondary" disabled={busy || loading} onClick={() => void restore(item)}><Undo2 />恢复记录</Button> : <>
             <a className="history-open" href={`/?room=${encodeURIComponent(item.id)}`}>查看详情<ArrowRight size={16} /></a>
+            <ReplayButton roomId={item.id} />
             <Button variant="ghost" className="restaurant-delete" aria-label={`${item.isHost ? '删除投票' : '移除历史'} ${item.title}`} disabled={busy || loading} onClick={() => { setDeleteError(''); setDeleting(item); }}><Trash2 size={16} />{item.isHost ? '删除' : '移除'}</Button>
           </>}</div>
         </article>)}
