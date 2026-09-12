@@ -15,6 +15,13 @@
       "when": 1789192577260,
       "tag": "0001_deep_the_liberteens",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789193338445,
+      "tag": "0002_nice_nomad",
+      "breakpoints": true
     }
   ]
 }

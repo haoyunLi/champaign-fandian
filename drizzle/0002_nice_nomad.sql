@@ -1,0 +1,1 @@
+ALTER TABLE `restaurants` ADD `deleted` integer DEFAULT 0 NOT NULL;

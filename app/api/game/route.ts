@@ -29,7 +29,7 @@ async function seed(db: D1Database, owner: string) {
 async function catalog(db: D1Database, owner: string) {
   await seed(db,'shared');
   const [restaurants,rooms] = await db.batch([
-    db.prepare('SELECT id,name,cuisine,address,source,selected,position FROM restaurants WHERE owner=? ORDER BY position,id').bind('shared'),
+    db.prepare('SELECT id,name,cuisine,address,source,selected,position FROM restaurants WHERE owner=? AND deleted=0 ORDER BY position,id').bind('shared'),
     db.prepare('SELECT id,title,status FROM rooms WHERE owner=? ORDER BY created_at DESC LIMIT 8').bind(owner),
   ]);
   return { restaurants:restaurants.results, rooms:rooms.results };
@@ -68,11 +68,23 @@ async function handle(request: Request) {
         const name=clean(body.name,60,'餐馆名称'), cuisine=clean(body.cuisine,40,'餐馆类型',false),address=clean(body.address,160,'地址',false);
         if (body.id) {
           const id=clean(body.id,80,'餐馆编号');
-          const changed=await db.prepare('UPDATE restaurants SET name=?,cuisine=?,address=?,source=CASE WHEN name=? AND address=? THEN source ELSE \'\' END WHERE id=? AND owner=?').bind(name,cuisine,address,name,address,id,'shared').run();
+          const changed=await db.prepare('UPDATE restaurants SET name=?,cuisine=?,address=?,source=CASE WHEN name=? AND address=? THEN source ELSE \'\' END WHERE id=? AND owner=? AND deleted=0').bind(name,cuisine,address,name,address,id,'shared').run();
           if (!changed.meta.changes) throw new UserError('餐馆不存在。',404);
         } else {
-          const added=await db.prepare('INSERT INTO restaurants (id,owner,name,cuisine,address,source,selected,position) SELECT ?,?,?,?,?,\'\',1,? WHERE (SELECT COUNT(*) FROM restaurants WHERE owner=\'shared\')<100').bind(crypto.randomUUID(),'shared',name,cuisine,address,Date.now()).run();
+          const added=await db.prepare('INSERT INTO restaurants (id,owner,name,cuisine,address,source,selected,position) SELECT ?,?,?,?,?,\'\',1,? WHERE (SELECT COUNT(*) FROM restaurants WHERE owner=\'shared\' AND deleted=0)<100').bind(crypto.randomUUID(),'shared',name,cuisine,address,Date.now()).run();
           if(!added.meta.changes) throw new UserError('餐馆库最多保存 100 家餐馆。');
+        }
+        result=await catalog(db,owner);
+      } else if (body.action==='deleteRestaurant' || body.action==='restoreRestaurant') {
+        const id=clean(body.id,80,'餐馆编号');
+        const existing=await db.prepare('SELECT id FROM restaurants WHERE id=? AND owner=\'shared\'').bind(id).first();
+        if(!existing) throw new UserError('餐馆不存在。',404);
+        if(body.action==='deleteRestaurant') {
+          // Keep the row as a tombstone: an empty catalog must not regenerate the initial seeds.
+          await db.prepare('UPDATE restaurants SET deleted=1 WHERE id=? AND owner=\'shared\'').bind(id).run();
+        } else {
+          const restored=await db.prepare('UPDATE restaurants SET deleted=0 WHERE id=? AND owner=\'shared\' AND (deleted=0 OR (SELECT COUNT(*) FROM restaurants WHERE owner=\'shared\' AND deleted=0)<100)').bind(id).run();
+          if(!restored.meta.changes) throw new UserError('餐馆库已满 100 家，请先删除一家再撤销。',409);
         }
         result=await catalog(db,owner);
       } else if (body.action==='create') {
@@ -80,7 +92,7 @@ async function handle(request: Request) {
         const title=clean(body.title,60,'投票名称');
         if(!Array.isArray(body.restaurantIds)||body.restaurantIds.length<2||body.restaurantIds.length>100) throw new UserError('请选择 2–100 家候选餐馆。');
         const ids=[...new Set(body.restaurantIds.map(id=>clean(id,80,'餐馆编号')))];
-        const rows=(await db.prepare(`SELECT * FROM restaurants WHERE owner='shared' AND id IN (${ids.map(()=>'?').join(',')}) ORDER BY position,id`).bind(...ids).all<Restaurant>()).results;
+        const rows=(await db.prepare(`SELECT * FROM restaurants WHERE owner='shared' AND deleted=0 AND id IN (${ids.map(()=>'?').join(',')}) ORDER BY position,id`).bind(...ids).all<Restaurant>()).results;
         if(rows.length!==ids.length||rows.length<2) throw new UserError('候选名单已变化，请刷新后重新选择。');
         const id=crypto.randomUUID().replaceAll('-','');
         await db.batch([

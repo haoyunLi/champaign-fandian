@@ -3,7 +3,7 @@ export const restaurants = sqliteTable('restaurants', {
   id: text('id').primaryKey(), owner: text('owner').notNull(), name: text('name').notNull(),
   cuisine: text('cuisine').notNull(), address: text('address').notNull().default(''),
   source: text('source').notNull().default(''), selected: integer('selected').notNull().default(1),
-  position: integer('position').notNull(),
+  position: integer('position').notNull(), deleted: integer('deleted').notNull().default(0),
 }, t => [index('idx_restaurants_owner').on(t.owner)]);
 export const rooms = sqliteTable('rooms', {
   id: text('id').primaryKey(), owner: text('owner').notNull(), title: text('title').notNull(),

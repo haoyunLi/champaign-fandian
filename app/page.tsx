@@ -1,12 +1,13 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, Check, Copy, Dice5, Loader2, Pencil, Plus, Soup, Users, Trophy, ExternalLink } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, Copy, Dice5, Loader2, Pencil, Plus, Soup, Users, Trophy, ExternalLink, Trash2, Undo2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import type { Catalog, Restaurant, Room } from '@/lib/types';
 import { FoodOrders } from '@/components/food-orders';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 
 async function api<T>(payload?: Record<string, unknown>, room?: string): Promise<T> {
   const response = await fetch(`/api/game${room ? `?room=${encodeURIComponent(room)}` : ''}`, payload ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : { cache: 'no-store' });
@@ -75,23 +76,27 @@ export default function Home() {
   const [catalog, setCatalog] = useState<Catalog | null>(null), [room, setRoom] = useState<Room | null>(null);
   const [roomId, setRoomId] = useState(''), [loading, setLoading] = useState(true), [error, setError] = useState('');
   const [editor, setEditor] = useState<Partial<Restaurant> | null>(null), [creating, setCreating] = useState(false), [title, setTitle] = useState('今晚吃什么？'), [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState<Restaurant | null>(null), [lastDeleted, setLastDeleted] = useState<Restaurant | null>(null), [deleteError, setDeleteError] = useState('');
+  const catalogEpoch = useRef(0);
   const currentRoom = useRef('');
   const acceptRoom = useCallback((incoming: Room) => {
     if (incoming.id !== currentRoom.current) return;
     setRoom(previous => previous?.id === incoming.id && previous.revision > incoming.revision ? previous : incoming);
   }, []);
   const acceptCatalog = useCallback((incoming: Catalog) => {
-    setCatalog(previous => ({ ...incoming, restaurants: incoming.restaurants.map(r => ({ ...r, selected: previous?.restaurants.find(p => p.id === r.id)?.selected ?? 1 })) }));
+    setCatalog(previous => ({ ...incoming, restaurants: incoming.restaurants.map(r => ({ ...r, selected: previous?.restaurants.find(p => p.id === r.id)?.selected ?? r.selected })) }));
   }, []);
+  const catalogChanged = useCallback((incoming: Catalog) => { catalogEpoch.current++; acceptCatalog(incoming); }, [acceptCatalog]);
   const load = useCallback(async (id: string) => {
+    const epoch = catalogEpoch.current;
     currentRoom.current = id; setRoomId(id); setRoom(null); setLoading(true); setError('');
-    try { if (id) { const r = await api<Room>(undefined, id); if (currentRoom.current === id) acceptRoom(r); } else { const c = await api<Catalog>(); if (!currentRoom.current) { acceptCatalog(c); setRoom(null); } } }
+    try { if (id) { const r = await api<Room>(undefined, id); if (currentRoom.current === id) acceptRoom(r); } else { const c = await api<Catalog>(); if (!currentRoom.current && epoch === catalogEpoch.current) { acceptCatalog(c); setRoom(null); } } }
     catch (e) { setError((e as Error).message); }
     finally { if (currentRoom.current === id) setLoading(false); }
   }, [acceptRoom, acceptCatalog]);
   useEffect(() => { const update = () => load(new URLSearchParams(window.location.search).get('room') || ''); update(); window.addEventListener('popstate', update); return () => window.removeEventListener('popstate', update); }, [load]);
   useEffect(() => { if (!roomId) return; let cancelled = false; let running = false; const timer = window.setInterval(async () => { if (running || document.hidden) return; running = true; try { const r = await api<Room>(undefined, roomId); if (!cancelled) { acceptRoom(r); setError(''); } } catch { if (!cancelled) setError('连接暂时中断，正在自动重连。'); } finally { running = false; } }, 4000); return () => { cancelled = true; clearInterval(timer); }; }, [roomId, acceptRoom]);
-  useEffect(() => { if (roomId) return; let cancelled = false; const timer = window.setInterval(async () => { if(document.hidden) return; try { const c = await api<Catalog>(); if(!cancelled && !currentRoom.current) acceptCatalog(c); } catch {} }, 8000); return () => {cancelled=true;clearInterval(timer);}; }, [roomId,acceptCatalog]);
+  useEffect(() => { if (roomId) return; let cancelled = false; const timer = window.setInterval(async () => { if(document.hidden) return; const epoch = catalogEpoch.current; try { const c = await api<Catalog>(); if(!cancelled && !currentRoom.current && epoch === catalogEpoch.current) acceptCatalog(c); } catch {} }, 8000); return () => {cancelled=true;clearInterval(timer);}; }, [roomId,acceptCatalog]);
   function navigate(id = '') { window.history.pushState({}, '', id ? `/?room=${id}` : '/'); load(id); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   const selected = catalog?.restaurants.filter(r => r.selected).length || 0;
   return <div className="app-shell"><header className="site-header"><a href="/" className="brand" onClick={e => { e.preventDefault(); navigate(); }}><Soup aria-hidden="true" /><span>饭点</span></a><span className="location">Champaign · Urbana</span><a className="nav-link" href={roomId ? '/' : '#restaurants'} onClick={e => { if (roomId) { e.preventDefault(); navigate(); } }}>餐馆清单</a></header>
@@ -99,13 +104,16 @@ export default function Home() {
       {loading ? <div className="loading"><Loader2 className="spin" /><p>正在准备餐桌…</p></div> : roomId ? room && room.id === roomId && <RoomView key={room.id} room={room} setRoom={acceptRoom} home={() => navigate()} /> : catalog && <>
         <section className="intro"><div className="intro-copy"><h1>今天吃什么？</h1><p>每人随机抽一家，<br className="mobile-break" />票数最多的就是今晚的目的地。</p></div><FoodArt /><div className="intro-action"><Button className="primary" disabled={selected < 2 || busy} onClick={() => { setError(''); setCreating(true); }}>创建一轮投票 <ArrowRight /></Button><span>{selected >= 2 ? '建好后，把链接发到微信群' : '请先选中至少两家餐馆'}</span></div></section>
         <section id="restaurants" className="catalog"><div className="section-heading"><div><h2>餐馆清单</h2><p>共享餐馆库 · 本轮已选 {selected} 家</p></div><Button variant="outline" className="secondary" onClick={() => setEditor({})}><Plus />添加餐馆</Button></div>
-          <div className="restaurant-list">{catalog.restaurants.map((r, i) => <div className={`restaurant-row ${!r.selected ? 'excluded' : ''}`} key={r.id}><Checkbox aria-label={`选择 ${r.name}`} checked={!!r.selected} disabled={busy} onCheckedChange={checked => setCatalog(previous => previous && ({ ...previous, restaurants: previous.restaurants.map(item => item.id === r.id ? { ...item, selected: checked ? 1 : 0 } : item) }))} /><span className="row-number">{String(i + 1).padStart(2, '0')}</span><div className="restaurant-info"><strong>{r.name}</strong><span>{r.cuisine || '自定义餐馆'}</span></div><div className="restaurant-address">{r.address || '可以补充你们熟悉的店名和地址'}</div>{r.source && <a href={r.source} target="_blank" rel="noreferrer" aria-label={`${r.name} 官网`} className="icon-button source-icon"><ExternalLink size={17} /></a>}<Button variant="ghost" size="icon" className="icon-button" aria-label={`修改 ${r.name}`} onClick={() => setEditor(r)}><Pencil size={17} /></Button></div>)}</div>
-          <p className="catalog-note">人人都能添加和改名；勾选只影响你创建的下一轮。已开始的投票名单保持不变。</p>
+          {lastDeleted && <div className="delete-notice" role="status"><span>已删除「{lastDeleted.name}」</span><Button variant="ghost" disabled={busy} onClick={async () => { setBusy(true); setError(''); try { const restored = await api<Catalog>({ action: 'restoreRestaurant', id: lastDeleted.id }); catalogChanged({ ...restored, restaurants: restored.restaurants.map(r => r.id === lastDeleted.id ? { ...r, selected: lastDeleted.selected } : r) }); setLastDeleted(null); } catch(e) { setError((e as Error).message); } finally { setBusy(false); } }}><Undo2 />撤销</Button></div>}
+          {!catalog.restaurants.length && <p className="catalog-empty">还没有餐馆，点击「添加餐馆」开始吧。</p>}
+          <div className="restaurant-list">{catalog.restaurants.map((r, i) => <div className={`restaurant-row ${!r.selected ? 'excluded' : ''}`} key={r.id}><Checkbox aria-label={`选择 ${r.name}`} checked={!!r.selected} disabled={busy} onCheckedChange={checked => setCatalog(previous => previous && ({ ...previous, restaurants: previous.restaurants.map(item => item.id === r.id ? { ...item, selected: checked ? 1 : 0 } : item) }))} /><span className="row-number">{String(i + 1).padStart(2, '0')}</span><div className="restaurant-info"><strong>{r.name}</strong><span>{r.cuisine || '自定义餐馆'}</span></div><div className="restaurant-address">{r.address || '可以补充你们熟悉的店名和地址'}</div>{r.source && <a href={r.source} target="_blank" rel="noreferrer" aria-label={`${r.name} 官网`} className="icon-button source-icon"><ExternalLink size={17} /></a>}<Button variant="ghost" size="icon" className="icon-button" aria-label={`修改 ${r.name}`} onClick={() => setEditor(r)}><Pencil size={17} /></Button><Button variant="ghost" className="restaurant-delete" aria-label={`删除 ${r.name}`} disabled={busy} onClick={() => { setDeleteError(''); setDeleting(r); }}><Trash2 size={16} /><span>删除</span></Button></div>)}</div>
+          <p className="catalog-note">人人都能添加、改名和删除；勾选只影响你创建的下一轮。已开始的投票名单保持不变。</p>
         </section>
         {!!catalog.rooms.length && <section className="recent"><h2>我发起的投票</h2>{catalog.rooms.map(r => <button key={r.id} onClick={() => navigate(r.id)}><span>{r.title}</span><span>{r.status === 'closed' ? '已结束' : '投票中'}<ArrowRight size={17} /></span></button>)}</section>}
       </>}
     </main><footer><span>饭点 · 和饭搭子一起，少纠结一顿。</span><span>随机抽签 · 一人一票</span></footer>
-    {editor && <RestaurantEditor item={editor} close={() => setEditor(null)} saved={acceptCatalog} />}
+    {editor && <RestaurantEditor item={editor} close={() => setEditor(null)} saved={catalogChanged} />}
+    <AlertDialog open={!!deleting} onOpenChange={open => !open && !busy && setDeleting(null)}><AlertDialogContent className="editor-dialog"><AlertDialogHeader><AlertDialogTitle>删除这家餐馆？</AlertDialogTitle><AlertDialogDescription>「{deleting?.name}」会从大家共用的餐馆库中移除，之后的新投票不再可选。已开始的投票、结果和带饭记录不受影响。删除后可点击「撤销」恢复。</AlertDialogDescription></AlertDialogHeader>{deleteError && <p className="error" role="alert">{deleteError}</p>}<AlertDialogFooter><AlertDialogCancel className="secondary" disabled={busy}>取消</AlertDialogCancel><AlertDialogAction className="delete-confirm" variant="destructive" disabled={busy} onClick={async e => { e.preventDefault(); if(!deleting) return; setBusy(true); setDeleteError(''); try { catalogChanged(await api<Catalog>({ action:'deleteRestaurant', id:deleting.id })); setLastDeleted(deleting); setDeleting(null); } catch(e) { setDeleteError((e as Error).message); } finally { setBusy(false); } }}>{busy ? '正在删除…' : '确认删除'}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
     <Dialog open={creating} onOpenChange={open => !busy && setCreating(open)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>今天这顿，你来组局</DialogTitle><DialogDescription>本轮包含已选的 {selected} 家餐馆，每人随机抽一家并投一票。</DialogDescription></DialogHeader><form onSubmit={async e => { e.preventDefault(); setBusy(true); setError(''); try { const r = await api<Room>({ action: 'create', title, restaurantIds: catalog?.restaurants.filter(r => r.selected).map(r => r.id) }); setCreating(false); window.history.pushState({}, '', `/?room=${r.id}`); currentRoom.current = r.id; setRoomId(r.id); acceptRoom(r); window.scrollTo({ top: 0 }); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }}><label className="field">这轮投票的名字<Input required maxLength={60} value={title} onChange={e => setTitle(e.target.value)} /></label>{error && <p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy}>{busy ? <Loader2 className="spin" /> : <Plus />}{busy ? '正在创建…' : '创建投票，叫上大家'}</Button><p className="fine-print">请保留此浏览器，之后用它结束本轮投票。</p></form></DialogContent></Dialog>
   </div>;
 }
