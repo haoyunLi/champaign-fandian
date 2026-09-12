@@ -227,10 +227,9 @@ async function handle(request: Request) {
       } else if (body.action==='close') {
         const id=clean(body.room,64,'投票编号');
         const room=await roomState(db,id,owner);
-        if(!room.isHost) throw new UserError('只有发起人可以结束本轮。',403);
         if(!room.total) throw new UserError('至少收到一票后才能结束。');
-        // Winner selection and closing are one atomic statement. Votes can no longer enter afterward.
-        await db.prepare("UPDATE rooms SET status='closed',decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),revision=revision+1,winner_id=(SELECT c.id FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id AND v.room_id=c.room_id WHERE c.room_id=? GROUP BY c.id ORDER BY COUNT(v.id) DESC,random() LIMIT 1) WHERE id=? AND owner=? AND status='open' AND deleted_at IS NULL").bind(id,id,owner).run();
+        // Anyone with the room link can close voting. Only the first close fixes the winner and delivery clock.
+        await db.prepare("UPDATE rooms SET status='closed',decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),revision=revision+1,winner_id=(SELECT c.id FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id AND v.room_id=c.room_id WHERE c.room_id=? GROUP BY c.id ORDER BY COUNT(v.id) DESC,random() LIMIT 1) WHERE id=? AND status='open' AND deleted_at IS NULL").bind(id,id).run();
         result=await roomState(db,id,owner);
       } else if (body.action==='order' || body.action==='claim' || body.action==='deliver' || body.action==='release' || body.action==='cancelOrder') {
         const id=clean(body.room,64,'投票编号');
