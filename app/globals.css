@@ -76,6 +76,12 @@
 .replay-action .error{max-width:270px;margin:8px 0 0;font-size:13px}
 .history-actions{flex-wrap:wrap;gap:12px}
 .order-toolbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin:18px 0}
+.order-intake{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:15px 17px;margin:0 0 18px;border:1px solid #e1e6ec;border-radius:13px;background:#fafbfd}
+.order-intake strong{font-size:14px;color:#40536d}
+.order-intake p{font-size:13px;line-height:1.8;color:#6b788b;margin:5px 0 0}
+.order-intake .secondary{flex-shrink:0;min-height:44px}
+.intake-stopped{background:#f6f1e9;border-color:#e9ddcd}
+@media(max-width:600px){.order-intake{align-items:flex-start;flex-direction:column;gap:10px}.order-intake .secondary{align-self:flex-end}}
 .order-filters{display:flex;gap:3px;padding:4px;border-radius:12px;background:#f2f5f8}
 .order-filters button{min-height:42px;padding:8px 13px;color:#6a7688;border-radius:9px;font-size:14px}
 .order-filters button[aria-pressed=true]{background:#fff;color:#b34725;box-shadow:0 2px 5px #1722380a}

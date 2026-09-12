@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import type { MealLifecycle } from '@/lib/types';
+import { formatMealDateTime } from '@/lib/meal-date';
 
 type PhaseInfo=Pick<MealLifecycle,'phase'|'delivery_deadline_at'>;
 export function useMealPhase(meal: PhaseInfo) {
@@ -18,5 +19,5 @@ export function MealStatus({meal}:{meal:PhaseInfo}) {
   return <span className={`status ${phase==='finished'?'ended':phase==='delivery'?'delivering':''}`}>{phase==='finished'?'已结束':phase==='delivery'?'带饭中':'投票中'}</span>;
 }
 export function deadlineLabel(value:string|null) {
-  return value ? new Date(value).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
+  return value ? `${formatMealDateTime(value)}（香槟时间）` : '';
 }

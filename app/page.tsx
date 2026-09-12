@@ -29,6 +29,7 @@ function HomeMealCard({ meal, open }: { meal: HomeMeal; open: (id: string) => vo
       <span className="active-meal-detail">{meal.isHost ? '我发起的' : '我参与或保存的'} · {meal.winner_name || `${meal.vote_count} 人已投`}</span>
       <span className="home-meal-date">发起于 <time dateTime={meal.created_at}>{formatMealDateTime(meal.created_at)}</time> · 香槟时间</span>
       {meal.phase !== 'voting' && <>
+        {meal.orders_stopped_at && meal.phase!=='finished' && <span className="home-meal-outcome">已停止加单 · 继续处理已登记的带饭</span>}
         {meal.order_count ? <span className="home-order-counts">
           <span className={meal.pending_count ? 'has-pending' : ''}>待认领 <b>{meal.pending_count}</b> 条</span>
           <span className={meal.claimed_count ? 'has-claimed' : ''}>已认领 <b>{meal.claimed_count}</b> 条</span>
@@ -94,7 +95,7 @@ function RoomView({ room, setRoom, home }: { room: Room; setRoom: (r: Room) => v
     <div className="room-top"><Button variant="ghost" className="back" onClick={home}><ArrowLeft />餐馆清单</Button><Button variant="outline" className="secondary" onClick={() => { setCopied(false); setShare(true); }}><Copy />邀请群友</Button></div>
     {!room.isHost && <div className="room-history-save"><span>{room.inHistory ? '已收录到「我参与的」，下次可从历史记录找回。' : '先保存这轮，下次打开历史记录就能找到。'}</span><Button variant="ghost" disabled={savingHistory || room.inHistory} onClick={async () => { setSavingHistory(true); setHistoryError(''); try { setRoom(await api<Room>({action:'saveHistory',room:room.id})); } catch(e) { setHistoryError((e as Error).message); } finally { setSavingHistory(false); } }}>{savingHistory ? <Loader2 className="spin" /> : room.inHistory ? <Check /> : <BookmarkPlus />}{savingHistory ? '正在保存…' : room.inHistory ? '已保存' : '保存到历史'}</Button></div>}
     {historyError && <p className="error" role="alert">{historyError}</p>}
-    <section className="room-heading"><div><h1>{room.title}</h1><p>{phase==='finished' ? '本轮饭局已结束，结果和带饭清单仍可查看。' : closed ? '餐馆已确定，继续登记和安排带饭吧。' : manual ? '每人选一家想吃的餐馆，票数最多的就是目的地。' : '每人随机抽一家，让大家的运气一起决定。'}</p></div><div className="room-badges"><span className="mode-badge">{manual ? '自主投票' : '随机抽签'}</span><MealStatus meal={room} /></div></section>
+    <section className="room-heading"><div><h1>{room.title}</h1><p>{phase==='finished' ? '本轮饭局已结束，结果和带饭清单仍可查看。' : closed ? room.orders_stopped_at ? '已停止加单，继续安排已登记的带饭吧。' : '餐馆已确定，继续登记和安排带饭吧。' : manual ? '每人选一家想吃的餐馆，票数最多的就是目的地。' : '每人随机抽一家，让大家的运气一起决定。'}</p></div><div className="room-badges"><span className="mode-badge">{manual ? '自主投票' : '随机抽签'}</span><MealStatus meal={room} /></div></section>
     {closed && <><section className="chosen-restaurant"><div className="chosen-heading"><Trophy/><span>本轮选定餐馆</span></div><div className="chosen-content"><div><h2>{winner?.name}</h2><p>{winner?.count} 票 · {tied>1?'平票后随机选定':'本轮票数最高'}{winner?.address&&` · ${winner.address}`}</p></div>{winner?.source&&<a className="source-link" href={winner.source} target="_blank" rel="noreferrer">餐馆官网<ExternalLink size={16}/></a>}</div></section><FoodOrders room={room} update={setRoom}/>{phase==='finished'&&<div className="room-replay"><span>下次还用这份候选名单？</span><ReplayButton roomId={room.id}/></div>}</>}
     {!closed && <div className="room-grid"><section className={`draw-panel ${closed ? 'winner-panel' : ''}`} aria-live="polite">
       {mine ? <><div className="draw-number">{manual ? <Check /> : String(mine.position).padStart(2, '0')}</div><p className="draw-label">{manual ? '你已投票给' : '你的随机号码，已自动投票给'}</p><h2>{mine.name}</h2><p className="voted"><Check size={18} />{room.myVote?.nickname}，这一票已计入</p><p className="muted">等大家投完后，任何人都可以结束投票、确定餐馆。</p></>
@@ -116,6 +117,17 @@ export default function Home() {
   const [editor, setEditor] = useState<Partial<Restaurant> | null>(null), [creating, setCreating] = useState(false), [title, setTitle] = useState('今晚吃什么？'), [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState<Restaurant | null>(null), [lastDeleted, setLastDeleted] = useState<Restaurant | null>(null), [deleteError, setDeleteError] = useState('');
   const [mode, setMode] = useState<VotingMode>('random');
+  const [pendingCreation,setPendingCreation] = useState(false);
+  const createRunning = useRef(false);
+  const createAttempt = useRef<{requestId:string;title:string;mode:VotingMode;restaurantIds:string[]}|null>(null);
+  useEffect(()=>{
+    try {
+      const saved=JSON.parse(sessionStorage.getItem('fd_pending_create')||'null');
+      if(saved && typeof saved.requestId==='string' && /^[a-f0-9-]{36}$/.test(saved.requestId) && typeof saved.title==='string' && ['random','manual'].includes(saved.mode) && Array.isArray(saved.restaurantIds) && saved.restaurantIds.every((id:unknown)=>typeof id==='string')) {
+        createAttempt.current=saved;setTitle(saved.title);setMode(saved.mode);setPendingCreation(true);
+      }
+    } catch {}
+  },[]);
   const catalogEpoch = useRef(0);
   const loadSequence = useRef(0);
   const pageLoading = useRef(true);
@@ -159,6 +171,23 @@ export default function Home() {
     return () => { cancelled = true; clearInterval(timer); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); };
   }, [roomId, acceptCatalog]);
   function navigate(id = '') { window.history.pushState({}, '', id ? `/?room=${id}` : '/'); load(id); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+  function clearCreateAttempt() {
+    createAttempt.current=null;setPendingCreation(false);
+    try { sessionStorage.removeItem('fd_pending_create'); } catch {}
+  }
+  async function createRoom() {
+    if(createRunning.current) return;
+    createRunning.current=true;setBusy(true);setError('');
+    if(!createAttempt.current) createAttempt.current={requestId:crypto.randomUUID(),title,mode,restaurantIds:catalog?.restaurants.filter(r=>r.selected).map(r=>r.id)||[]};
+    try { sessionStorage.setItem('fd_pending_create',JSON.stringify(createAttempt.current)); } catch {}
+    try {
+      const r=await api<Room>({action:'create',...createAttempt.current});
+      clearCreateAttempt();setCreating(false);window.history.pushState({},'',`/?room=${r.id}`);currentRoom.current=r.id;setRoomId(r.id);acceptRoom(r);window.scrollTo({top:0});
+    } catch(e) {
+      if(e instanceof ApiError && e.status<500) { clearCreateAttempt();setError(e.message); }
+      else { setPendingCreation(true);setError('暂时没收到创建结果，请重试。已保留本次填写内容，不会重复创建饭局。'); }
+    } finally { createRunning.current=false;setBusy(false); }
+  }
   const selected = catalog?.restaurants.filter(r => r.selected).length || 0;
   return <div className="app-shell"><header className="site-header"><a href="/" className="brand" onClick={e => { e.preventDefault(); navigate(); }}><Soup aria-hidden="true" /><span>饭点</span></a><span className="location">Champaign · Urbana</span><nav className="site-nav" aria-label="主导航"><a className="nav-link active" href={roomId ? '/' : '#restaurants'} onClick={e => { if (roomId) { e.preventDefault(); navigate(); } }}>餐馆清单</a><a className="nav-link" href="/history">历史记录</a></nav></header>
     <main className={room && room.phase!=='finished' ? 'has-mobile-action' : ''}>{error && <div className="error page-error" role="alert">{error}<Button variant="ghost" onClick={() => load(roomId)}>重试</Button></div>}
@@ -166,7 +195,7 @@ export default function Home() {
         {catalogSyncError && <p className="home-sync-error" role="status">带饭状态暂未更新，正在自动重连。恢复连接后会自动更新。</p>}
         {!!catalog.activeRooms.length && <section className="active-meals"><div className="section-heading"><div><h2>正在进行的饭局</h2><p>我发起和参与的 · {catalog.activeRoomCount} 局进行中</p><p className="home-sync-note">带饭状态每 8 秒自动更新</p></div><a className="history-open" href="/history">全部记录<ArrowRight size={16}/></a></div><div className="active-meal-list">{catalog.activeRooms.map(r => <HomeMealCard key={r.id} meal={r} open={navigate}/>)}</div>{catalog.activeRoomCount>catalog.activeRooms.length&&<a href="/history" className="history-open">还有 {catalog.activeRoomCount-catalog.activeRooms.length} 局，查看全部记录</a>}</section>}
         {!!catalog.recentFinishedRooms.length && <section className="active-meals recent-finished-meals"><div className="section-heading"><div><h2>最近结束的带饭</h2><p>最近 24 小时 · 最多展示 4 局</p></div><a className="history-open" href="/history">全部记录<ArrowRight size={16}/></a></div><div className="active-meal-list">{catalog.recentFinishedRooms.map(r => <HomeMealCard key={r.id} meal={r} open={navigate}/>)}</div></section>}
-        <section className="intro"><div className="intro-copy"><h1>今天吃什么？</h1><p>自己投票，或随机抽签，<br className="mobile-break" />票数最多的就是今晚的目的地。</p></div><FoodArt /><div className="intro-action"><Button className="primary" disabled={selected < 2 || busy} onClick={() => { setError(''); setCreating(true); }}>创建一轮投票 <ArrowRight /></Button><span>{selected >= 2 ? '建好后，把链接发到微信群' : '请先选中至少两家餐馆'}</span></div></section>
+        <section className="intro"><div className="intro-copy"><h1>今天吃什么？</h1><p>自己投票，或随机抽签，<br className="mobile-break" />票数最多的就是今晚的目的地。</p></div><FoodArt /><div className="intro-action"><Button className="primary" disabled={(!pendingCreation && selected < 2) || busy} onClick={() => { setError(''); setCreating(true); }}>{pendingCreation?'继续上次创建':'创建一轮投票'} <ArrowRight /></Button><span>{selected >= 2 ? '建好后，把链接发到微信群' : '请先选中至少两家餐馆'}</span></div></section>
         <section id="restaurants" className="catalog"><div className="section-heading"><div><h2>餐馆清单</h2><p>共享餐馆库 · 本轮已选 {selected} 家</p></div><Button variant="outline" className="secondary" onClick={() => setEditor({})}><Plus />添加餐馆</Button></div>
           {lastDeleted && <div className="delete-notice" role="status"><span>已删除「{lastDeleted.name}」</span><Button variant="ghost" disabled={busy} onClick={async () => { setBusy(true); setError(''); try { const restored = await api<Catalog>({ action: 'restoreRestaurant', id: lastDeleted.id }); catalogChanged({ ...restored, restaurants: restored.restaurants.map(r => r.id === lastDeleted.id ? { ...r, selected: lastDeleted.selected } : r) }); setLastDeleted(null); } catch(e) { setError((e as Error).message); } finally { setBusy(false); } }}><Undo2 />撤销</Button></div>}
           {!catalog.restaurants.length && <p className="catalog-empty">还没有餐馆，点击「添加餐馆」开始吧。</p>}
@@ -178,6 +207,6 @@ export default function Home() {
     </main><footer><span>饭点 · 和饭搭子一起，少纠结一顿。</span><span>自主投票 · 随机抽签</span></footer>
     {editor && <RestaurantEditor item={editor} close={() => setEditor(null)} saved={catalogChanged} />}
     <AlertDialog open={!!deleting} onOpenChange={open => !open && !busy && setDeleting(null)}><AlertDialogContent className="editor-dialog"><AlertDialogHeader><AlertDialogTitle>删除这家餐馆？</AlertDialogTitle><AlertDialogDescription>「{deleting?.name}」会从大家共用的餐馆库中移除，之后的新投票不再可选。已开始的投票、结果和带饭记录不受影响。删除后可点击「撤销」恢复。</AlertDialogDescription></AlertDialogHeader>{deleteError && <p className="error" role="alert">{deleteError}</p>}<AlertDialogFooter><AlertDialogCancel className="secondary" disabled={busy}>取消</AlertDialogCancel><AlertDialogAction className="delete-confirm" variant="destructive" disabled={busy} onClick={async e => { e.preventDefault(); if(!deleting) return; setBusy(true); setDeleteError(''); try { catalogChanged(await api<Catalog>({ action:'deleteRestaurant', id:deleting.id })); setLastDeleted(deleting); setDeleting(null); } catch(e) { setDeleteError((e as Error).message); } finally { setBusy(false); } }}>{busy ? '正在删除…' : '确认删除'}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
-    <Dialog open={creating} onOpenChange={open => !busy && setCreating(open)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>今天这顿，你来组局</DialogTitle><DialogDescription>本轮包含已选的 {selected} 家餐馆。{mode === 'manual' ? '每人自主选择一家餐馆投票。' : '每人随机抽一家餐馆并自动投票。'}</DialogDescription></DialogHeader><form onSubmit={async e => { e.preventDefault(); setBusy(true); setError(''); try { const r = await api<Room>({ action: 'create', title, mode, restaurantIds: catalog?.restaurants.filter(r => r.selected).map(r => r.id) }); setCreating(false); window.history.pushState({}, '', `/?room=${r.id}`); currentRoom.current = r.id; setRoomId(r.id); acceptRoom(r); window.scrollTo({ top: 0 }); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }}><label className="field">这轮投票的名字<Input required maxLength={60} value={title} onChange={e => setTitle(e.target.value)} /></label><fieldset className="mode-field" disabled={busy}><legend>选择本轮玩法</legend><div className="mode-options"><label className={`mode-option ${mode === 'manual' ? 'chosen' : ''}`}><input type="radio" name="voting-mode" value="manual" checked={mode === 'manual'} onChange={() => setMode('manual')} /><VoteIcon aria-hidden="true" /><span><strong>自主投票</strong><small>每人自己选一家想吃的餐馆</small></span></label><label className={`mode-option ${mode === 'random' ? 'chosen' : ''}`}><input type="radio" name="voting-mode" value="random" checked={mode === 'random'} onChange={() => setMode('random')} /><Dice5 aria-hidden="true" /><span><strong>随机抽签</strong><small>每人随机抽一家，自动计一票</small></span></label></div><p className="fine-print">两种玩法均为一人一票，最高票获胜；平票时随机选一家。创建后玩法固定。</p></fieldset>{error && <p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy}>{busy ? <Loader2 className="spin" /> : <Plus />}{busy ? '正在创建…' : '创建投票，叫上大家'}</Button><p className="fine-print">任何持有本轮链接的人都可以结束投票。请保留此浏览器，方便从历史记录管理你发起的饭局。</p></form></DialogContent></Dialog>
+    <Dialog open={creating} onOpenChange={open => !busy && setCreating(open)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>今天这顿，你来组局</DialogTitle><DialogDescription>本轮包含已选的 {pendingCreation ? createAttempt.current?.restaurantIds.length : selected} 家餐馆。{mode === 'manual' ? '每人自主选择一家餐馆投票。' : '每人随机抽一家餐馆并自动投票。'}</DialogDescription></DialogHeader><form onSubmit={e => { e.preventDefault(); void createRoom(); }}><label className="field">这轮投票的名字<Input disabled={busy||pendingCreation} required maxLength={60} value={title} onChange={e => setTitle(e.target.value)} /></label><fieldset className="mode-field" disabled={busy||pendingCreation}><legend>选择本轮玩法</legend><div className="mode-options"><label className={`mode-option ${mode === 'manual' ? 'chosen' : ''}`}><input type="radio" name="voting-mode" value="manual" checked={mode === 'manual'} onChange={() => setMode('manual')} /><VoteIcon aria-hidden="true" /><span><strong>自主投票</strong><small>每人自己选一家想吃的餐馆</small></span></label><label className={`mode-option ${mode === 'random' ? 'chosen' : ''}`}><input type="radio" name="voting-mode" value="random" checked={mode === 'random'} onChange={() => setMode('random')} /><Dice5 aria-hidden="true" /><span><strong>随机抽签</strong><small>每人随机抽一家，自动计一票</small></span></label></div><p className="fine-print">两种玩法均为一人一票，最高票获胜；平票时随机选一家。创建后玩法固定。</p></fieldset>{error && <p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy}>{busy ? <Loader2 className="spin" /> : <Plus />}{busy ? '正在创建…' : pendingCreation ? '重试，找回上次创建的饭局' : '创建投票，叫上大家'}</Button><p className="fine-print">任何持有本轮链接的人都可以结束投票。请保留此浏览器，方便从历史记录管理你发起的饭局。</p></form></DialogContent></Dialog>
   </div>;
 }

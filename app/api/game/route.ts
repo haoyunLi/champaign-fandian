@@ -5,9 +5,13 @@ import type { Restaurant, Room, Vote, FoodOrder, HistoryRoom, HistoryPage, HomeM
 
 export const dynamic = 'force-dynamic';
 class UserError extends Error { constructor(message: string, public status = 400, public code?: string, public room?: Room) { super(message); } }
-function foodRetryAccepted(room: Room, action: unknown, orderId: string) {
+function foodRetryAccepted(room: Room, action: unknown, orderId: string, expectedRevision?: unknown) {
   const existing=room.orders.find(order=>order.id===orderId);
-  return (action==='order' && existing?.isMine) || (action==='deliver' && existing?.status==='delivered' && existing.canManage);
+  return (action==='order' && existing?.isMine) || (action==='deliver' && existing?.status==='delivered' && existing.canManage && Number.isInteger(expectedRevision) && existing.revision===(expectedRevision as number)+1);
+}
+async function hashText(value: string) {
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest),x=>x.toString(16).padStart(2,'0')).join('');
 }
 function mealFinishedError(room: Room) {
   return new UserError(room.completion_reason==='delivered' ? '带饭已全部带回，本轮已结束。' : '确定餐馆已满 12 小时，本轮已自动结束。',409);
@@ -40,7 +44,7 @@ async function catalog(db: D1Database, owner: string) {
   const visibleFrom=`FROM rooms r LEFT JOIN room_history h ON h.room_id=r.id AND h.owner=?
     WHERE r.deleted_at IS NULL AND (r.owner=? OR (h.room_id IS NOT NULL AND h.hidden_at IS NULL))`;
   const activeFrom=`${visibleFrom} AND (r.status='open' OR (r.status='closed' AND r.completed_at IS NULL))`;
-  const summarySelect=`SELECT r.id,r.title,r.status,r.mode,r.created_at,r.deleted_at,r.decided_at,r.completed_at,r.completion_reason,
+  const summarySelect=`SELECT r.id,r.title,r.status,r.mode,r.created_at,r.deleted_at,r.decided_at,r.completed_at,r.completion_reason,r.orders_stopped_at,
     r.owner=? AS isHost,(SELECT name FROM candidates WHERE id=r.winner_id AND room_id=r.id) AS winner_name,
     (SELECT COUNT(*) FROM votes WHERE room_id=r.id) AS vote_count,(SELECT COUNT(*) FROM orders WHERE room_id=r.id) AS order_count,
     (SELECT COUNT(*) FROM orders WHERE room_id=r.id AND status='pending') AS pending_count,
@@ -124,11 +128,11 @@ async function roomState(db: D1Database, id: string, owner: string): Promise<Roo
     db.prepare('SELECT hidden_at FROM room_history WHERE owner=? AND room_id=?').bind(owner,id),
     db.prepare('SELECT nickname FROM visitor_preferences WHERE owner=?').bind(owner),
   ]);
-  const room=roomRows.results[0] as (LifecycleRow & {id:string;title:string;status:string;mode:VotingMode;winner_id:string|null;created_at:string;revision:number;owner:string})|undefined;
+  const room=roomRows.results[0] as (LifecycleRow & {id:string;title:string;status:string;mode:VotingMode;winner_id:string|null;created_at:string;revision:number;owner:string;orders_stopped_at:string|null})|undefined;
   if (!room) throw new UserError('这轮投票不存在或已被发起人删除。发起人可在历史记录的回收站中恢复。',404);
   const personalHistory=history.results[0] as {hidden_at:string|null}|undefined;
   const participated=myVote.results.length>0 || (orders.results as {owner:string;claimant:string|null}[]).some(o=>o.owner===owner||o.claimant===owner);
-  return { ...mealLifecycle(room),preferred_nickname:String((preferences.results[0] as {nickname:string}|undefined)?.nickname || ''),id:room.id,title:room.title,status:room.status,mode:room.mode,winner_id:room.winner_id,created_at:room.created_at,revision:room.revision,isHost:room.owner===owner,inHistory:room.owner===owner || (personalHistory ? personalHistory.hidden_at===null : participated),candidates:candidates.results as Restaurant[],votes:votes.results as Vote[],myVote:myVote.results[0] as Vote||null,total:votes.results.length,orders:(orders.results as (FoodOrder & {owner:string;claimant:string|null})[]).map(o=>({id:o.id,nickname:o.nickname,dish:o.dish,quantity:o.quantity,note:o.note,status:o.status,revision:o.revision,isCarrier:o.claimant===owner,claimant_name:o.claimant_name,created_at:o.created_at,isMine:o.owner===owner,canManage:o.claimant===owner||room.owner===owner})) };
+  return { ...mealLifecycle(room),orders_stopped_at:room.orders_stopped_at,canStopOrders:room.owner===owner || (orders.results as {status:string;claimant:string|null}[]).some(o=>o.status==='claimed'&&o.claimant===owner),preferred_nickname:String((preferences.results[0] as {nickname:string}|undefined)?.nickname || ''),id:room.id,title:room.title,status:room.status,mode:room.mode,winner_id:room.winner_id,created_at:room.created_at,revision:room.revision,isHost:room.owner===owner,inHistory:room.owner===owner || (personalHistory ? personalHistory.hidden_at===null : participated),candidates:candidates.results as Restaurant[],votes:votes.results as Vote[],myVote:myVote.results[0] as Vote||null,total:votes.results.length,orders:(orders.results as (FoodOrder & {owner:string;claimant:string|null})[]).map(o=>({id:o.id,nickname:o.nickname,dish:o.dish,quantity:o.quantity,note:o.note,status:o.status,revision:o.revision,isCarrier:o.claimant===owner,claimant_name:o.claimant_name,created_at:o.created_at,isMine:o.owner===owner,canManage:o.claimant===owner||room.owner===owner})) };
 }
 async function handle(request: Request) {
   let cookie: string | null = null;
@@ -204,19 +208,30 @@ async function handle(request: Request) {
         }
         result=await catalog(db,owner);
       } else if (body.action==='create') {
-        await seed(db,'shared');
         const title=clean(body.title,60,'投票名称');
         const mode=body.mode === undefined ? 'random' : body.mode;
         if(mode!=='random' && mode!=='manual') throw new UserError('请选择自主投票或随机抽签。');
         if(!Array.isArray(body.restaurantIds)||body.restaurantIds.length<2||body.restaurantIds.length>100) throw new UserError('请选择 2–100 家候选餐馆。');
-        const ids=[...new Set(body.restaurantIds.map(id=>clean(id,80,'餐馆编号')))];
-        const rows=(await db.prepare(`SELECT * FROM restaurants WHERE owner='shared' AND deleted=0 AND id IN (${ids.map(()=>'?').join(',')}) ORDER BY position,id`).bind(...ids).all<Restaurant>()).results;
-        if(rows.length!==ids.length||rows.length<2) throw new UserError('候选名单已变化，请刷新后重新选择。');
-        const id=crypto.randomUUID().replaceAll('-','');
-        await db.batch([
-          db.prepare('INSERT INTO rooms (id,owner,title,status,created_at,mode) VALUES (?,?,?,\'open\',?,?)').bind(id,owner,title,new Date().toISOString(),mode),
-          ...rows.map((r,i)=>db.prepare('INSERT INTO candidates (id,room_id,name,cuisine,address,source,position) VALUES (?,?,?,?,?,?,?)').bind(crypto.randomUUID(),id,r.name,r.cuisine,r.address,r.source,i+1)),
-        ]);
+        const ids=[...new Set(body.restaurantIds.map(id=>clean(id,80,'餐馆编号')))].sort();
+        if(ids.length<2) throw new UserError('请选择至少两家不同的餐馆。');
+        if(typeof body.requestId!=='string'||!/^[a-f0-9-]{36}$/.test(body.requestId)) throw new UserError('页面已更新，请刷新后重新创建。');
+        const id=(await hashText(`create:${owner}:${body.requestId}`)).slice(0,32);
+        const requestHash=await hashText(JSON.stringify({title,mode,restaurantIds:ids}));
+        const existing=await db.prepare('SELECT creation_request_hash FROM rooms WHERE id=? AND owner=?').bind(id,owner).first<{creation_request_hash:string|null}>();
+        if(!existing) {
+          await seed(db,'shared');
+          const rows=(await db.prepare(`SELECT * FROM restaurants WHERE owner='shared' AND deleted=0 AND id IN (${ids.map(()=>'?').join(',')}) ORDER BY position,id`).bind(...ids).all<Restaurant>()).results;
+          if(rows.length!==ids.length) throw new UserError('候选名单已变化，请刷新后重新选择。');
+          // The room and its complete candidate snapshot commit together. Retry IDs are stable.
+          await db.batch([
+            db.prepare("INSERT OR IGNORE INTO rooms (id,owner,title,status,created_at,mode,creation_request_hash) VALUES (?,?,?,'open',?,?,?)").bind(id,owner,title,new Date().toISOString(),mode,requestHash),
+            ...rows.map((r,i)=>db.prepare(`INSERT OR IGNORE INTO candidates (id,room_id,name,cuisine,address,source,position)
+              SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND owner=? AND creation_request_hash=?)`)
+              .bind(`${id}-${i+1}`,id,r.name,r.cuisine,r.address,r.source,i+1,id,owner,requestHash)),
+          ]);
+        }
+        const saved=existing || await db.prepare('SELECT creation_request_hash FROM rooms WHERE id=? AND owner=?').bind(id,owner).first<{creation_request_hash:string|null}>();
+        if(saved?.creation_request_hash!==requestHash) throw new UserError('这次创建请求的内容已变化，请刷新后再创建新饭局。',409);
         result=await roomState(db,id,owner);
       } else if (body.action==='replay') {
         const sourceId=clean(body.room,64,'原投票编号'), requestId=clean(body.requestId,36,'请求编号');
@@ -273,32 +288,50 @@ async function handle(request: Request) {
         // Anyone with the room link can close voting. Only the first close fixes the winner and delivery clock.
         await db.prepare("UPDATE rooms SET status='closed',decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),revision=revision+1,winner_id=(SELECT c.id FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id AND v.room_id=c.room_id WHERE c.room_id=? GROUP BY c.id ORDER BY COUNT(v.id) DESC,random() LIMIT 1) WHERE id=? AND status='open' AND deleted_at IS NULL").bind(id,id).run();
         result=await roomState(db,id,owner);
+      } else if (body.action==='stopOrders') {
+        const id=clean(body.room,64,'投票编号');
+        const room=await roomState(db,id,owner);
+        if(room.orders_stopped_at) result=room;
+        else {
+          if(room.phase==='finished') throw mealFinishedError(room);
+          if(room.status!=='closed') throw new UserError('确定餐馆后才能停止加单。',409);
+          if(!room.canStopOrders) throw new UserError('只有发起人或当前已认领带饭的人可以停止加单。',403);
+          const changed=await db.prepare(`UPDATE rooms SET orders_stopped_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),revision=revision+1
+            WHERE id=? AND orders_stopped_at IS NULL AND ${ACTIVE_DELIVERY_SQL}
+            AND (owner=? OR EXISTS (SELECT 1 FROM orders WHERE room_id=rooms.id AND claimant=? AND status='claimed'))`).bind(id,owner,owner).run();
+          const current=await roomState(db,id,owner);
+          if(!changed.meta.changes&&!current.orders_stopped_at) {
+            if(current.phase==='finished') throw mealFinishedError(current);
+            throw new UserError('认领状态已变化，请查看最新清单后重试。',409,'ORDER_CHANGED',current);
+          }
+          result=current;
+        }
       } else if (body.action==='order' || body.action==='editOrder' || body.action==='claim' || body.action==='deliver' || body.action==='release' || body.action==='cancelOrder') {
         const id=clean(body.room,64,'投票编号');
         const room=await roomState(db,id,owner);
         if(room.status!=='closed') throw new UserError('餐馆确定后才能登记带饭。',409);
         // Retrying the final delivery or an already accepted order remains safe after completion.
-        if(room.phase==='finished') {
-          const retryId=clean(body.orderId,64,'带饭编号');
-          if(foodRetryAccepted(room,body.action,retryId)) {
-            result=room;
-          } else throw mealFinishedError(room);
-        } else {
+        const retryId=clean(body.orderId,64,'带饭编号');
+        if(foodRetryAccepted(room,body.action,retryId,body.expectedRevision)) result=room;
+        else if(room.phase==='finished') throw mealFinishedError(room);
+        else {
         let statement: D1PreparedStatement;
         if(body.action==='order') {
+          if(room.orders_stopped_at) throw new UserError('本轮已停止加单，已有登记仍可继续认领和带回。',409,'ORDERS_STOPPED',room);
           const nickname=clean(body.nickname,24,'群昵称'),dish=clean(body.dish,100,'菜名'),note=clean(body.note,240,'备注',false);
           const quantity=body.quantity;
           if(typeof quantity!=='number'||!Number.isInteger(quantity)||quantity<1||quantity>20) throw new UserError('份数请填写 1–20。');
           const orderId=clean(body.orderId,64,'登记编号');
           if(!/^[a-f0-9-]{36}$/.test(orderId)) throw new UserError('登记编号无效。');
           // A client-generated request ID makes retrying a submitted order safe.
-          statement=db.prepare(`INSERT OR IGNORE INTO orders (id,room_id,owner,nickname,dish,quantity,note,status,created_at) SELECT ?,?,?,?,?,?,?,'pending',? WHERE (SELECT COUNT(*) FROM orders WHERE room_id=?)<200 AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,owner,nickname,dish,quantity,note,new Date().toISOString(),id,id);
+          statement=db.prepare(`INSERT OR IGNORE INTO orders (id,room_id,owner,nickname,dish,quantity,note,status,created_at) SELECT ?,?,?,?,?,?,?,'pending',? WHERE (SELECT COUNT(*) FROM orders WHERE room_id=?)<200 AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND orders_stopped_at IS NULL AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,owner,nickname,dish,quantity,note,new Date().toISOString(),id,id);
         } else {
           const orderId=clean(body.orderId,64,'带饭编号');
           const order=room.orders.find(o=>o.id===orderId);
           if(!order) throw new UserError('这条带饭登记已取消，请刷新。',404);
-          if(body.action==='editOrder' || body.action==='claim') {
-            if(!Number.isInteger(body.expectedRevision) || body.expectedRevision!==order.revision) throw new UserError('这条登记已更新，请查看最新内容后重试。',409,'ORDER_CHANGED',room);
+          if(body.action==='editOrder' || body.action==='claim' || body.action==='deliver' || body.action==='release') {
+            if(!Number.isInteger(body.expectedRevision)) throw new UserError('页面已更新，请刷新页面后再操作。',409,'ORDER_CHANGED',room);
+            if(body.expectedRevision!==order.revision) throw new UserError('这条登记已更新，请查看最新内容后重试。',409,'ORDER_CHANGED',room);
           }
           if(body.action==='editOrder') {
             if(!order.isMine) throw new UserError('只能修改自己的带饭登记。',403);
@@ -317,7 +350,7 @@ async function handle(request: Request) {
             statement=db.prepare(`DELETE FROM orders WHERE id=? AND room_id=? AND owner=? AND status='pending' AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,owner,id);
           } else {
             if(!order.canManage) throw new UserError('只有带饭人或本轮发起人可以操作。',403);
-            statement=body.action==='deliver' ? db.prepare(`UPDATE orders SET status='delivered',revision=revision+1 WHERE id=? AND room_id=? AND status='claimed' AND (claimant=? OR EXISTS(SELECT 1 FROM rooms WHERE id=? AND owner=?)) AND (?=1 OR EXISTS (SELECT 1 FROM orders other WHERE other.room_id=orders.room_id AND other.id<>orders.id AND other.status<>'delivered')) AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,owner,id,owner,body.confirmFinish===true?1:0,id) : db.prepare(`UPDATE orders SET status='pending',claimant=NULL,claimant_name=NULL,revision=revision+1 WHERE id=? AND room_id=? AND status='claimed' AND (claimant=? OR EXISTS(SELECT 1 FROM rooms WHERE id=? AND owner=?)) AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,owner,id,owner,id);
+            statement=body.action==='deliver' ? db.prepare(`UPDATE orders SET status='delivered',revision=revision+1 WHERE id=? AND room_id=? AND status='claimed' AND revision=? AND (claimant=? OR EXISTS(SELECT 1 FROM rooms WHERE id=? AND owner=?)) AND (?=1 OR EXISTS (SELECT 1 FROM orders other WHERE other.room_id=orders.room_id AND other.id<>orders.id AND other.status<>'delivered')) AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,body.expectedRevision,owner,id,owner,body.confirmFinish===true?1:0,id) : db.prepare(`UPDATE orders SET status='pending',claimant=NULL,claimant_name=NULL,revision=revision+1 WHERE id=? AND room_id=? AND status='claimed' AND revision=? AND (claimant=? OR EXISTS(SELECT 1 FROM rooms WHERE id=? AND owner=?)) AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,body.expectedRevision,owner,id,owner,id);
           }
         }
         // Preserve the existing order owner and claimant before cancellation or release,
@@ -335,9 +368,11 @@ async function handle(request: Request) {
             ON CONFLICT(owner) DO UPDATE SET nickname=excluded.nickname`).bind(owner,normalizedOrderId,id,owner)] : []),
           finishMeal(db,'id=?',[id])]);
         const current=await roomState(db,id,owner);
-        if(!changed[1].meta.changes && !foodRetryAccepted(current,body.action,normalizedOrderId)) {
+        if(!changed[1].meta.changes && !foodRetryAccepted(current,body.action,normalizedOrderId,body.expectedRevision)) {
           if(current.phase==='finished') throw mealFinishedError(current);
           const latest=current.orders.find(o=>o.id===normalizedOrderId);
+          if(body.action==='order' && current.orders_stopped_at) throw new UserError('本轮刚刚停止加单，填写内容已保留。',409,'ORDERS_STOPPED',current);
+          if((body.action==='deliver'||body.action==='release')&&latest?.revision!==body.expectedRevision) throw new UserError('这份登记或认领人已变化，请查看最新内容后重试。',409,'ORDER_CHANGED',current);
           if(body.action==='deliver' && body.confirmFinish!==true && latest?.status==='claimed' && latest.canManage && current.orders.filter(o=>o.status!=='delivered').length===1)
             throw new UserError('这是最后一份带饭，确认带回后本轮将结束。',409,'FINAL_DELIVERY_CONFIRM_REQUIRED',current);
           if(body.action==='editOrder' || body.action==='claim') throw new UserError('这条登记刚被修改或认领，请查看最新内容后重试。',409,'ORDER_CHANGED',current);
