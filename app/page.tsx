@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, Check, Copy, Dice5, Loader2, Pencil, Plus, Soup, Users, Trophy, ExternalLink, Trash2, Undo2, Vote as VoteIcon } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, Copy, Dice5, Loader2, Pencil, Plus, Soup, Users, Trophy, ExternalLink, Trash2, Undo2, BookmarkPlus, Vote as VoteIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -38,6 +38,8 @@ function RoomView({ room, setRoom, home }: { room: Room; setRoom: (r: Room) => v
   const [share, setShare] = useState(false), [copied, setCopied] = useState(false), [confirm, setConfirm] = useState(false);
   const [displayNumber, setDisplayNumber] = useState('？');
   const [candidateId, setCandidateId] = useState('');
+  const [savingHistory, setSavingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState('');
   const linkRef = useRef<HTMLInputElement>(null);
   const mine = room.candidates.find(r => r.id === room.myVote?.candidate_id);
   const winner = room.candidates.find(r => r.id === room.winner_id);
@@ -61,6 +63,8 @@ function RoomView({ room, setRoom, home }: { room: Room; setRoom: (r: Room) => v
   }
   return <>
     <div className="room-top"><Button variant="ghost" className="back" onClick={home}><ArrowLeft />餐馆清单</Button><Button variant="outline" className="secondary" onClick={() => { setCopied(false); setShare(true); }}><Copy />邀请群友</Button></div>
+    {!room.isHost && <div className="room-history-save"><span>{room.inHistory ? '已收录到「我参与的」，下次可从历史记录找回。' : '先保存这轮，下次打开历史记录就能找到。'}</span><Button variant="ghost" disabled={savingHistory || room.inHistory} onClick={async () => { setSavingHistory(true); setHistoryError(''); try { setRoom(await api<Room>({action:'saveHistory',room:room.id})); } catch(e) { setHistoryError((e as Error).message); } finally { setSavingHistory(false); } }}>{savingHistory ? <Loader2 className="spin" /> : room.inHistory ? <Check /> : <BookmarkPlus />}{savingHistory ? '正在保存…' : room.inHistory ? '已保存' : '保存到历史'}</Button></div>}
+    {historyError && <p className="error" role="alert">{historyError}</p>}
     <section className="room-heading"><div><h1>{room.title}</h1><p>{closed ? '目的地已定，出发吧。' : manual ? '每人选一家想吃的餐馆，票数最多的就是目的地。' : '每人随机抽一家，让大家的运气一起决定。'}</p></div><div className="room-badges"><span className="mode-badge">{manual ? '自主投票' : '随机抽签'}</span><span className={`status ${closed ? 'ended' : ''}`}>{closed ? '已结束' : '正在投票'}</span></div></section>
     <div className="room-grid"><section className={`draw-panel ${closed ? 'winner-panel' : ''}`} aria-live="polite">
       {closed && winner ? <><Trophy className="large-icon" /><p className="draw-label">今天就吃这家</p><h2>{winner.name}</h2><p>{winner.count} 票 · {tied > 1 ? `${tied} 家平票，已随机选出` : '本轮票数最高'}</p>{winner.address && <p className="winner-address">{winner.address}</p>}{winner.source && <a className="source-link" href={winner.source} target="_blank" rel="noreferrer">查看餐馆官网 <ExternalLink size={14} /></a>}<FoodArt small /></>

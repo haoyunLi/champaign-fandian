@@ -34,8 +34,27 @@ async function catalog(db: D1Database, owner: string) {
   ]);
   return { restaurants:restaurants.results, rooms:rooms.results };
 }
+async function backfillHistory(db: D1Database, owner: string) {
+  // Import earlier participation without resurrecting entries the visitor removed.
+  await db.prepare(`INSERT OR IGNORE INTO room_history (owner,room_id,created_at)
+    SELECT ?,activity.room_id,MIN(activity.created_at) FROM (
+      SELECT room_id,created_at FROM votes WHERE voter=?
+      UNION ALL SELECT room_id,created_at FROM orders WHERE owner=?
+      UNION ALL SELECT room_id,created_at FROM orders WHERE claimant=?
+    ) activity JOIN rooms r ON r.id=activity.room_id WHERE r.owner<>? GROUP BY activity.room_id`).bind(owner,owner,owner,owner,owner).run();
+}
+function recordParticipation(db: D1Database, id: string, owner: string) {
+  // Run in the action's transaction: only an actual vote, order or claim records a visit.
+  return db.prepare(`INSERT OR IGNORE INTO room_history (owner,room_id,created_at)
+    SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND owner<>? AND deleted_at IS NULL)
+    AND (EXISTS (SELECT 1 FROM votes WHERE room_id=? AND voter=?)
+      OR EXISTS (SELECT 1 FROM orders WHERE room_id=? AND (owner=? OR claimant=?)))`)
+    .bind(owner,id,new Date().toISOString(),id,owner,id,owner,id,owner,owner);
+}
 async function historyPage(db: D1Database, owner: string, url: URL): Promise<HistoryPage> {
   const trash = url.searchParams.get('history') === 'trash';
+  const scope=url.searchParams.get('scope') || 'all';
+  if(!['all','hosted','joined'].includes(scope)) throw new UserError('历史记录分类无效。');
   const cursorText = url.searchParams.get('cursor');
   let cursor: { createdAt: string; id: string } | null = null;
   if (cursorText) {
@@ -45,27 +64,39 @@ async function historyPage(db: D1Database, owner: string, url: URL): Promise<His
       cursor = value;
     } catch { throw new UserError('历史记录页码无效，请重新打开历史记录。'); }
   }
-  const rows = (await db.prepare(`SELECT r.id,r.title,r.status,r.mode,r.created_at,r.deleted_at,c.name AS winner_name,
+  await backfillHistory(db,owner);
+  const rows = (await db.prepare(`WITH viewer AS (SELECT ? AS owner)
+    SELECT r.id,r.title,r.status,r.mode,r.created_at,
+    CASE WHEN r.owner=viewer.owner THEN r.deleted_at ELSE h.hidden_at END AS deleted_at,
+    r.owner=viewer.owner AS isHost,c.name AS winner_name,
     (SELECT COUNT(*) FROM votes v WHERE v.room_id=r.id) AS vote_count,
     (SELECT COUNT(*) FROM orders o WHERE o.room_id=r.id) AS order_count
-    FROM rooms r LEFT JOIN candidates c ON c.id=r.winner_id AND c.room_id=r.id
-    WHERE r.owner=? AND r.deleted_at IS ${trash ? 'NOT NULL' : 'NULL'}
+    FROM rooms r CROSS JOIN viewer
+    LEFT JOIN room_history h ON h.room_id=r.id AND h.owner=viewer.owner
+    LEFT JOIN candidates c ON c.id=r.winner_id AND c.room_id=r.id
+    WHERE ${trash
+      ? '((r.owner=viewer.owner AND r.deleted_at IS NOT NULL) OR (r.owner<>viewer.owner AND r.deleted_at IS NULL AND h.hidden_at IS NOT NULL))'
+      : 'r.deleted_at IS NULL AND (r.owner=viewer.owner OR (h.room_id IS NOT NULL AND h.hidden_at IS NULL))'}
+    ${scope==='hosted' ? 'AND r.owner=viewer.owner' : scope==='joined' ? 'AND r.owner<>viewer.owner' : ''}
     ${cursor ? 'AND (r.created_at<? OR (r.created_at=? AND r.id<?))' : ''}
     ORDER BY r.created_at DESC,r.id DESC LIMIT 21`).bind(owner, ...(cursor ? [cursor.createdAt,cursor.createdAt,cursor.id] : [])).all<HistoryRoom>()).results;
-  const rooms = rows.slice(0,20), last = rooms.at(-1);
+  const rooms = rows.slice(0,20).map(row=>({...row,isHost:!!row.isHost})), last = rooms.at(-1);
   return { rooms, nextCursor: rows.length > 20 && last ? JSON.stringify({createdAt:last.created_at,id:last.id}) : null };
 }
 async function roomState(db: D1Database, id: string, owner: string): Promise<Room> {
-  const [roomRows,candidates,votes,myVote,orders] = await db.batch([
+  const [roomRows,candidates,votes,myVote,orders,history] = await db.batch([
     db.prepare('SELECT * FROM rooms WHERE id=? AND deleted_at IS NULL').bind(id),
     db.prepare('SELECT c.id,c.name,c.cuisine,c.address,c.source,c.position,COUNT(v.id) AS count FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id AND v.room_id=c.room_id WHERE c.room_id=? GROUP BY c.id ORDER BY c.position').bind(id),
     db.prepare('SELECT nickname,candidate_id,created_at FROM votes WHERE room_id=? ORDER BY created_at DESC').bind(id),
     db.prepare('SELECT nickname,candidate_id,created_at FROM votes WHERE room_id=? AND voter=?').bind(id,owner),
     db.prepare('SELECT * FROM orders WHERE room_id=? ORDER BY created_at,id').bind(id),
+    db.prepare('SELECT hidden_at FROM room_history WHERE owner=? AND room_id=?').bind(owner,id),
   ]);
   const room=roomRows.results[0] as {id:string;title:string;status:string;mode:VotingMode;winner_id:string|null;created_at:string;revision:number;owner:string}|undefined;
   if (!room) throw new UserError('这轮投票不存在或已被发起人删除。发起人可在历史记录的回收站中恢复。',404);
-  return { id:room.id,title:room.title,status:room.status,mode:room.mode,winner_id:room.winner_id,created_at:room.created_at,revision:room.revision,isHost:room.owner===owner,candidates:candidates.results as Restaurant[],votes:votes.results as Vote[],myVote:myVote.results[0] as Vote||null,total:votes.results.length,orders:(orders.results as (FoodOrder & {owner:string;claimant:string|null})[]).map(o=>({id:o.id,nickname:o.nickname,dish:o.dish,quantity:o.quantity,note:o.note,status:o.status,claimant_name:o.claimant_name,created_at:o.created_at,isMine:o.owner===owner,canManage:o.claimant===owner||room.owner===owner})) };
+  const personalHistory=history.results[0] as {hidden_at:string|null}|undefined;
+  const participated=myVote.results.length>0 || (orders.results as {owner:string;claimant:string|null}[]).some(o=>o.owner===owner||o.claimant===owner);
+  return { id:room.id,title:room.title,status:room.status,mode:room.mode,winner_id:room.winner_id,created_at:room.created_at,revision:room.revision,isHost:room.owner===owner,inHistory:room.owner===owner || (personalHistory ? personalHistory.hidden_at===null : participated),candidates:candidates.results as Restaurant[],votes:votes.results as Vote[],myVote:myVote.results[0] as Vote||null,total:votes.results.length,orders:(orders.results as (FoodOrder & {owner:string;claimant:string|null})[]).map(o=>({id:o.id,nickname:o.nickname,dish:o.dish,quantity:o.quantity,note:o.note,status:o.status,claimant_name:o.claimant_name,created_at:o.created_at,isMine:o.owner===owner,canManage:o.claimant===owner||room.owner===owner})) };
 }
 async function handle(request: Request) {
   let cookie: string | null = null;
@@ -84,7 +115,29 @@ async function handle(request: Request) {
       let body: Record<string,unknown>;
       try { body=JSON.parse(raw); } catch { throw new UserError('提交内容无效。'); }
       if (!body || typeof body!=='object' || Array.isArray(body)) throw new UserError('提交内容无效。');
-      if (body.action==='deleteRoom' || body.action==='restoreRoom') {
+      if (body.action==='saveHistory') {
+        const id=clean(body.room,64,'投票编号');
+        const room=await roomState(db,id,owner);
+        if(!room.isHost) await db.batch([
+          db.prepare(`INSERT INTO room_history (owner,room_id,created_at) SELECT ?,?,?
+            WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND deleted_at IS NULL AND owner<>?)
+            ON CONFLICT(owner,room_id) DO UPDATE SET hidden_at=NULL`).bind(owner,id,new Date().toISOString(),id,owner),
+          db.prepare('UPDATE rooms SET revision=revision+1 WHERE id=? AND deleted_at IS NULL').bind(id),
+        ]);
+        result=await roomState(db,id,owner);
+      } else if (body.action==='removeHistory' || body.action==='restoreHistory') {
+        const id=clean(body.room,64,'投票编号');
+        await backfillHistory(db,owner);
+        const changed=await db.batch([
+          db.prepare(`UPDATE room_history SET hidden_at=? WHERE owner=? AND room_id=?
+            AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND owner<>? AND deleted_at IS NULL)`)
+            .bind(body.action==='removeHistory' ? new Date().toISOString() : null,owner,id,id,owner),
+          db.prepare(`UPDATE rooms SET revision=revision+1 WHERE id=? AND owner<>? AND deleted_at IS NULL
+            AND EXISTS (SELECT 1 FROM room_history WHERE owner=? AND room_id=?)`).bind(id,owner,owner,id),
+        ]);
+        if(!changed[0].meta.changes) throw new UserError('记录不存在或投票已被发起人删除，无法操作。',404);
+        result={ok:true};
+      } else if (body.action==='deleteRoom' || body.action==='restoreRoom') {
         const id=clean(body.room,64,'投票编号');
         const owned=await db.prepare('SELECT id FROM rooms WHERE id=? AND owner=?').bind(id,owner).first();
         if(!owned) throw new UserError('找不到你发起的这轮投票。请使用发起时的浏览器操作。',404);
@@ -149,6 +202,7 @@ async function handle(request: Request) {
             await db.batch([
               db.prepare('INSERT INTO votes (id,room_id,voter,nickname,nickname_key,candidate_id,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND status=\'open\' AND deleted_at IS NULL) AND (SELECT COUNT(*) FROM votes WHERE room_id=?)<200').bind(crypto.randomUUID(),id,owner,nickname,nickname.toLocaleLowerCase(),picked.id,new Date().toISOString(),id,id),
               db.prepare('UPDATE rooms SET revision=revision+1 WHERE id=? AND deleted_at IS NULL').bind(id),
+              recordParticipation(db,id,owner),
             ]);
           } catch (e) {
             if(String(e).includes('UNIQUE')) {
@@ -196,10 +250,19 @@ async function handle(request: Request) {
             statement=body.action==='deliver' ? db.prepare('UPDATE orders SET status=\'delivered\' WHERE id=? AND room_id=? AND status=\'claimed\' AND (claimant=? OR EXISTS(SELECT 1 FROM rooms WHERE id=? AND owner=?)) AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND deleted_at IS NULL)').bind(orderId,id,owner,id,owner,id) : db.prepare('UPDATE orders SET status=\'pending\',claimant=NULL,claimant_name=NULL WHERE id=? AND room_id=? AND status=\'claimed\' AND (claimant=? OR EXISTS(SELECT 1 FROM rooms WHERE id=? AND owner=?)) AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND deleted_at IS NULL)').bind(orderId,id,owner,id,owner,id);
           }
         }
-        const changed=await db.batch([statement,db.prepare('UPDATE rooms SET revision=revision+1 WHERE id=? AND deleted_at IS NULL').bind(id)]);
-        if(!changed[0].meta.changes) {
+        // Preserve the existing order owner and claimant before cancellation or release,
+        // including a host releasing a guest's claim created before this feature existed.
+        const normalizedOrderId=clean(body.orderId,64,'带饭编号');
+        const previousParticipants=db.prepare(`INSERT OR IGNORE INTO room_history (owner,room_id,created_at)
+          SELECT people.owner,people.room_id,people.created_at FROM (
+            SELECT owner,room_id,created_at FROM orders WHERE id=? AND room_id=?
+            UNION SELECT claimant AS owner,room_id,created_at FROM orders WHERE id=? AND room_id=? AND claimant IS NOT NULL
+          ) people JOIN rooms r ON r.id=people.room_id WHERE r.owner<>people.owner AND r.deleted_at IS NULL`)
+          .bind(normalizedOrderId,id,normalizedOrderId,id);
+        const changed=await db.batch([previousParticipants,statement,db.prepare('UPDATE rooms SET revision=revision+1 WHERE id=? AND deleted_at IS NULL').bind(id),recordParticipation(db,id,owner)]);
+        if(!changed[1].meta.changes) {
           if(body.action==='order') {
-            const existing=await db.prepare('SELECT id FROM orders WHERE id=? AND room_id=? AND owner=?').bind(body.orderId as string,id,owner).first();
+            const existing=await db.prepare('SELECT id FROM orders WHERE id=? AND room_id=? AND owner=?').bind(normalizedOrderId,id,owner).first();
             if(!existing) throw new UserError('本轮带饭清单已满，请在群里联系发起人。',409);
           } else throw new UserError('这条登记刚被更新，请查看最新清单。',409);
         }

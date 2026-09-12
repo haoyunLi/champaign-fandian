@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, uniqueIndex, index } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, uniqueIndex, index, primaryKey } from 'drizzle-orm/sqlite-core';
 export const restaurants = sqliteTable('restaurants', {
   id: text('id').primaryKey(), owner: text('owner').notNull(), name: text('name').notNull(),
   cuisine: text('cuisine').notNull(), address: text('address').notNull().default(''),
@@ -20,9 +20,13 @@ export const votes = sqliteTable('votes', {
   id: text('id').primaryKey(), roomId: text('room_id').notNull().references(() => rooms.id),
   voter: text('voter').notNull(), nickname: text('nickname').notNull(), nicknameKey: text('nickname_key').notNull(),
   candidateId: text('candidate_id').notNull().references(() => candidates.id), createdAt: text('created_at').notNull(),
-}, t => [uniqueIndex('idx_votes_room_voter').on(t.roomId,t.voter), uniqueIndex('idx_votes_room_nickname').on(t.roomId,t.nicknameKey)]);
+}, t => [uniqueIndex('idx_votes_room_voter').on(t.roomId,t.voter), uniqueIndex('idx_votes_room_nickname').on(t.roomId,t.nicknameKey), index('idx_votes_voter_room').on(t.voter,t.roomId)]);
 export const orders = sqliteTable('orders', {
   id: text('id').primaryKey(), roomId: text('room_id').notNull().references(() => rooms.id), owner: text('owner').notNull(),
   nickname: text('nickname').notNull(), dish: text('dish').notNull(), quantity: integer('quantity').notNull(), note: text('note').notNull().default(''),
   status: text('status').notNull().default('pending'), claimant: text('claimant'), claimantName: text('claimant_name'), createdAt: text('created_at').notNull(),
-}, t => [index('idx_orders_room_created').on(t.roomId,t.createdAt)]);
+}, t => [index('idx_orders_room_created').on(t.roomId,t.createdAt), index('idx_orders_owner_room').on(t.owner,t.roomId), index('idx_orders_claimant_room').on(t.claimant,t.roomId)]);
+export const roomHistory = sqliteTable('room_history', {
+  owner: text('owner').notNull(), roomId: text('room_id').notNull().references(() => rooms.id),
+  createdAt: text('created_at').notNull(), hiddenAt: text('hidden_at'),
+}, t => [primaryKey({columns:[t.owner,t.roomId]})]);
