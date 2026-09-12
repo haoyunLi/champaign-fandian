@@ -89,7 +89,7 @@ export default function HistoryView() {
             <div className="history-title"><h2>{item.title}</h2><span className={`status ${item.status === 'closed' ? 'ended' : ''}`}>{item.status === 'closed' ? '已结束' : '投票中'}</span></div>
             <p className="history-date"><time dateTime={item.created_at}>{dateLabel(item.created_at)}</time> 发起{item.deleted_at && <> · <time dateTime={item.deleted_at}>{dateLabel(item.deleted_at)}</time> 删除</>}</p>
             <p className="history-result">{item.winner_name ? <>选定餐馆 <strong>{item.winner_name}</strong></> : '餐馆尚未确定'}</p>
-            <p className="history-counts">{item.vote_count} 人投票<span>·</span>{item.order_count} 条带饭登记</p>
+            <p className="history-counts">{item.mode === 'manual' ? '自主投票' : '随机抽签'}<span>·</span>{item.vote_count} 人投票<span>·</span>{item.order_count} 条带饭登记</p>
           </div>
           <div className="history-actions">{trash ? <Button variant="outline" className="secondary" disabled={busy || loading} onClick={() => void restore(item)}><Undo2 />恢复记录</Button> : <>
             <a className="history-open" href={`/?room=${encodeURIComponent(item.id)}`}>查看详情<ArrowRight size={16} /></a>
@@ -101,7 +101,7 @@ export default function HistoryView() {
       {!loading && !error && !rows.length && <div className="history-empty"><History size={36} aria-hidden="true" /><h2>{trash ? '回收站是空的' : '还没有你发起的投票'}</h2><p>{trash ? '删除的投票会出现在这里。' : '创建第一轮投票，和饭搭子一起决定今天吃什么。'}</p>{!trash && <a href="/" className="history-open">去发起投票<ArrowRight size={16} /></a>}</div>}
       {cursor && !loading && <Button variant="outline" className="secondary history-more" disabled={busy} onClick={() => void load(cursor)}>加载更早的记录</Button>}
     </main>
-    <footer><span>饭点 · 和饭搭子一起，少纠结一顿。</span><span>随机抽签 · 一人一票</span></footer>
+    <footer><span>饭点 · 和饭搭子一起，少纠结一顿。</span><span>自主投票 · 随机抽签</span></footer>
     <AlertDialog open={!!deleting} onOpenChange={open => !open && !busy && setDeleting(null)}><AlertDialogContent className="editor-dialog">
       <AlertDialogHeader><AlertDialogTitle>删除这轮历史记录？</AlertDialogTitle><AlertDialogDescription>「{deleting?.title}」的投票、结果和带饭清单会一起移入回收站。群里的原链接将暂时无法访问，也无法继续投票或登记带饭。你可以在回收站恢复整轮记录和链接。</AlertDialogDescription></AlertDialogHeader>
       {deleteError && <p className="error" role="alert">{deleteError}</p>}

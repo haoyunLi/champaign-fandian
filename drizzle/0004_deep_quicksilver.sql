@@ -1,0 +1,1 @@
+ALTER TABLE `rooms` ADD `mode` text DEFAULT 'random' NOT NULL;

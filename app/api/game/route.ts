@@ -1,6 +1,6 @@
 import { database } from '@/lib/game-db';
 import { seeds } from '@/lib/seeds';
-import type { Restaurant, Room, Vote, FoodOrder, HistoryRoom, HistoryPage } from '@/lib/types';
+import type { Restaurant, Room, Vote, FoodOrder, HistoryRoom, HistoryPage, VotingMode } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 class UserError extends Error { constructor(message: string, public status = 400) { super(message); } }
@@ -30,7 +30,7 @@ async function catalog(db: D1Database, owner: string) {
   await seed(db,'shared');
   const [restaurants,rooms] = await db.batch([
     db.prepare('SELECT id,name,cuisine,address,source,selected,position FROM restaurants WHERE owner=? AND deleted=0 ORDER BY position,id').bind('shared'),
-    db.prepare('SELECT id,title,status FROM rooms WHERE owner=? AND deleted_at IS NULL ORDER BY created_at DESC,id DESC LIMIT 8').bind(owner),
+    db.prepare('SELECT id,title,status,mode FROM rooms WHERE owner=? AND deleted_at IS NULL ORDER BY created_at DESC,id DESC LIMIT 8').bind(owner),
   ]);
   return { restaurants:restaurants.results, rooms:rooms.results };
 }
@@ -45,7 +45,7 @@ async function historyPage(db: D1Database, owner: string, url: URL): Promise<His
       cursor = value;
     } catch { throw new UserError('历史记录页码无效，请重新打开历史记录。'); }
   }
-  const rows = (await db.prepare(`SELECT r.id,r.title,r.status,r.created_at,r.deleted_at,c.name AS winner_name,
+  const rows = (await db.prepare(`SELECT r.id,r.title,r.status,r.mode,r.created_at,r.deleted_at,c.name AS winner_name,
     (SELECT COUNT(*) FROM votes v WHERE v.room_id=r.id) AS vote_count,
     (SELECT COUNT(*) FROM orders o WHERE o.room_id=r.id) AS order_count
     FROM rooms r LEFT JOIN candidates c ON c.id=r.winner_id AND c.room_id=r.id
@@ -63,9 +63,9 @@ async function roomState(db: D1Database, id: string, owner: string): Promise<Roo
     db.prepare('SELECT nickname,candidate_id,created_at FROM votes WHERE room_id=? AND voter=?').bind(id,owner),
     db.prepare('SELECT * FROM orders WHERE room_id=? ORDER BY created_at,id').bind(id),
   ]);
-  const room=roomRows.results[0] as {id:string;title:string;status:string;winner_id:string|null;created_at:string;revision:number;owner:string}|undefined;
+  const room=roomRows.results[0] as {id:string;title:string;status:string;mode:VotingMode;winner_id:string|null;created_at:string;revision:number;owner:string}|undefined;
   if (!room) throw new UserError('这轮投票不存在或已被发起人删除。发起人可在历史记录的回收站中恢复。',404);
-  return { id:room.id,title:room.title,status:room.status,winner_id:room.winner_id,created_at:room.created_at,revision:room.revision,isHost:room.owner===owner,candidates:candidates.results as Restaurant[],votes:votes.results as Vote[],myVote:myVote.results[0] as Vote||null,total:votes.results.length,orders:(orders.results as (FoodOrder & {owner:string;claimant:string|null})[]).map(o=>({id:o.id,nickname:o.nickname,dish:o.dish,quantity:o.quantity,note:o.note,status:o.status,claimant_name:o.claimant_name,created_at:o.created_at,isMine:o.owner===owner,canManage:o.claimant===owner||room.owner===owner})) };
+  return { id:room.id,title:room.title,status:room.status,mode:room.mode,winner_id:room.winner_id,created_at:room.created_at,revision:room.revision,isHost:room.owner===owner,candidates:candidates.results as Restaurant[],votes:votes.results as Vote[],myVote:myVote.results[0] as Vote||null,total:votes.results.length,orders:(orders.results as (FoodOrder & {owner:string;claimant:string|null})[]).map(o=>({id:o.id,nickname:o.nickname,dish:o.dish,quantity:o.quantity,note:o.note,status:o.status,claimant_name:o.claimant_name,created_at:o.created_at,isMine:o.owner===owner,canManage:o.claimant===owner||room.owner===owner})) };
 }
 async function handle(request: Request) {
   let cookie: string | null = null;
@@ -121,13 +121,15 @@ async function handle(request: Request) {
       } else if (body.action==='create') {
         await seed(db,'shared');
         const title=clean(body.title,60,'投票名称');
+        const mode=body.mode === undefined ? 'random' : body.mode;
+        if(mode!=='random' && mode!=='manual') throw new UserError('请选择自主投票或随机抽签。');
         if(!Array.isArray(body.restaurantIds)||body.restaurantIds.length<2||body.restaurantIds.length>100) throw new UserError('请选择 2–100 家候选餐馆。');
         const ids=[...new Set(body.restaurantIds.map(id=>clean(id,80,'餐馆编号')))];
         const rows=(await db.prepare(`SELECT * FROM restaurants WHERE owner='shared' AND deleted=0 AND id IN (${ids.map(()=>'?').join(',')}) ORDER BY position,id`).bind(...ids).all<Restaurant>()).results;
         if(rows.length!==ids.length||rows.length<2) throw new UserError('候选名单已变化，请刷新后重新选择。');
         const id=crypto.randomUUID().replaceAll('-','');
         await db.batch([
-          db.prepare('INSERT INTO rooms (id,owner,title,status,created_at) VALUES (?,?,?,\'open\',?)').bind(id,owner,title,new Date().toISOString()),
+          db.prepare('INSERT INTO rooms (id,owner,title,status,created_at,mode) VALUES (?,?,?,\'open\',?,?)').bind(id,owner,title,new Date().toISOString(),mode),
           ...rows.map((r,i)=>db.prepare('INSERT INTO candidates (id,room_id,name,cuisine,address,source,position) VALUES (?,?,?,?,?,?,?)').bind(crypto.randomUUID(),id,r.name,r.cuisine,r.address,r.source,i+1)),
         ]);
         result=await roomState(db,id,owner);
@@ -138,7 +140,11 @@ async function handle(request: Request) {
         else {
           if(room.status!=='open') throw new UserError('这轮已结束，不能再投票。',409);
           if(room.total>=200) throw new UserError('本轮已达到 200 人。');
-          const picked=room.candidates[randomIndex(room.candidates.length)] as {id:string};
+          // The room's saved mode controls voting; a submitted mode cannot override it.
+          const picked=room.mode==='manual'
+            ? room.candidates.find(candidate=>candidate.id===clean(body.candidateId,64,'想投票的餐馆'))
+            : room.candidates[randomIndex(room.candidates.length)];
+          if(!picked) throw new UserError('请选择本轮候选名单中的一家餐馆。');
           try {
             await db.batch([
               db.prepare('INSERT INTO votes (id,room_id,voter,nickname,nickname_key,candidate_id,created_at) SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND status=\'open\' AND deleted_at IS NULL) AND (SELECT COUNT(*) FROM votes WHERE room_id=?)<200').bind(crypto.randomUUID(),id,owner,nickname,nickname.toLocaleLowerCase(),picked.id,new Date().toISOString(),id,id),
