@@ -8,7 +8,7 @@ export const restaurants = sqliteTable('restaurants', {
 export const rooms = sqliteTable('rooms', {
   id: text('id').primaryKey(), owner: text('owner').notNull(), title: text('title').notNull(),
   status: text('status').notNull().default('open'), winnerId: text('winner_id'),
-  createdAt: text('created_at').notNull(), revision: integer('revision').notNull().default(0),
+  createdAt: text('created_at').notNull(), revision: integer('revision').notNull().default(0), deletedAt: text('deleted_at'),
 }, t => [index('idx_rooms_owner_created').on(t.owner, t.createdAt)]);
 export const candidates = sqliteTable('candidates', {
   id: text('id').primaryKey(), roomId: text('room_id').notNull().references(() => rooms.id),

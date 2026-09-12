@@ -1,0 +1,1 @@
+ALTER TABLE `rooms` ADD `deleted_at` text;
