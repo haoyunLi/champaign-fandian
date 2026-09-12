@@ -36,6 +36,18 @@
 .active-meal-title .status{font-size:13px;padding:4px 10px}
 .active-meal-detail{font-size:14px;color:#6a788b;line-height:1.7;overflow-wrap:anywhere}
 .active-meal-cta{display:flex;align-items:center;gap:8px;white-space:nowrap;font-size:14px;color:#b74724;flex-shrink:0}
+.home-order-counts{display:flex;flex-wrap:wrap;gap:8px;font-size:13px;line-height:1.6}
+.home-order-counts>span{padding:6px 9px;border-radius:8px;background:#eef1f5;color:#6b7585;white-space:nowrap}
+.home-order-counts b{font-weight:650;font-variant-numeric:tabular-nums}
+.home-order-counts .has-pending{background:#fff0df;color:#985018}
+.home-order-counts .has-claimed{background:#eaf0fc;color:#47669a}
+.home-order-counts .has-delivered{background:#eaf3e9;color:#476e4c}
+.home-meal-outcome{font-size:13px;color:#806333;line-height:1.7}
+.home-meal-outcome.all-delivered{color:#476e4c}
+.active-meals .section-heading .home-sync-note{font-size:12px;margin-top:5px;color:#748195}
+.home-sync-error{font-size:13px;padding:12px 14px;margin:20px 0 0;border-radius:10px;background:#fff4e5;color:#956124}
+.recent-finished-meals h2{font-size:21px}
+@media(max-width:380px){.home-order-counts{gap:5px}.home-order-counts>span{font-size:12px;padding:5px 6px}}
 .chosen-restaurant{padding:23px 26px;background:#fff6ed;border:1px solid #f2ddcb;border-radius:18px;margin-bottom:24px}
 .chosen-heading{display:flex;align-items:center;gap:9px;color:#aa5a28;font-size:14px;margin-bottom:10px}
 .chosen-heading svg{width:20px;height:20px}

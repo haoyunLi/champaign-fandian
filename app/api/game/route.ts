@@ -1,7 +1,7 @@
 import { database } from '@/lib/game-db';
 import { seeds } from '@/lib/seeds';
 import { ACTIVE_DELIVERY_SQL, finishMeal, mealLifecycle, settleMeals, type LifecycleRow } from '@/lib/meal-lifecycle';
-import type { Restaurant, Room, Vote, FoodOrder, HistoryRoom, HistoryPage, VotingMode } from '@/lib/types';
+import type { Restaurant, Room, Vote, FoodOrder, HistoryRoom, HistoryPage, HomeMeal, VotingMode } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 class UserError extends Error { constructor(message: string, public status = 400, public code?: string, public room?: Room) { super(message); } }
@@ -37,22 +37,30 @@ async function seed(db: D1Database, owner: string) {
 async function catalog(db: D1Database, owner: string) {
   await seed(db,'shared');
   await backfillHistory(db,owner);
-  const activeFrom=`FROM rooms r LEFT JOIN room_history h ON h.room_id=r.id AND h.owner=?
-    WHERE r.deleted_at IS NULL AND (r.owner=? OR (h.room_id IS NOT NULL AND h.hidden_at IS NULL))
-    AND (r.status='open' OR (r.status='closed' AND r.completed_at IS NULL))`;
-  const [,,restaurants,rooms,active,total] = await db.batch([
+  const visibleFrom=`FROM rooms r LEFT JOIN room_history h ON h.room_id=r.id AND h.owner=?
+    WHERE r.deleted_at IS NULL AND (r.owner=? OR (h.room_id IS NOT NULL AND h.hidden_at IS NULL))`;
+  const activeFrom=`${visibleFrom} AND (r.status='open' OR (r.status='closed' AND r.completed_at IS NULL))`;
+  const summarySelect=`SELECT r.id,r.title,r.status,r.mode,r.created_at,r.deleted_at,r.decided_at,r.completed_at,r.completion_reason,
+    r.owner=? AS isHost,(SELECT name FROM candidates WHERE id=r.winner_id AND room_id=r.id) AS winner_name,
+    (SELECT COUNT(*) FROM votes WHERE room_id=r.id) AS vote_count,(SELECT COUNT(*) FROM orders WHERE room_id=r.id) AS order_count,
+    (SELECT COUNT(*) FROM orders WHERE room_id=r.id AND status='pending') AS pending_count,
+    (SELECT COUNT(*) FROM orders WHERE room_id=r.id AND status='claimed') AS claimed_count,
+    (SELECT COUNT(*) FROM orders WHERE room_id=r.id AND status='delivered') AS delivered_count`;
+  const [,,restaurants,rooms,active,total,finished] = await db.batch([
     ...settleMeals(db,'owner=? OR id IN (SELECT room_id FROM room_history WHERE owner=?)',[owner,owner]),
     db.prepare('SELECT id,name,cuisine,address,source,selected,position FROM restaurants WHERE owner=? AND deleted=0 ORDER BY position,id').bind('shared'),
     db.prepare('SELECT id,title,status,mode,decided_at,completed_at,completion_reason FROM rooms WHERE owner=? AND deleted_at IS NULL ORDER BY created_at DESC,id DESC LIMIT 8').bind(owner),
-    db.prepare(`SELECT r.id,r.title,r.status,r.mode,r.created_at,r.deleted_at,r.decided_at,r.completed_at,r.completion_reason,
-      r.owner=? AS isHost,(SELECT name FROM candidates WHERE id=r.winner_id AND room_id=r.id) AS winner_name,
-      (SELECT COUNT(*) FROM votes WHERE room_id=r.id) AS vote_count,(SELECT COUNT(*) FROM orders WHERE room_id=r.id) AS order_count
-      ${activeFrom} ORDER BY r.created_at DESC,r.id DESC LIMIT 8`).bind(owner,owner,owner),
+    db.prepare(`${summarySelect} ${activeFrom} ORDER BY r.created_at DESC,r.id DESC LIMIT 8`).bind(owner,owner,owner),
     db.prepare(`SELECT COUNT(*) AS count ${activeFrom}`).bind(owner,owner),
+    db.prepare(`${summarySelect} ${visibleFrom} AND r.status='closed'
+      AND r.completed_at>=strftime('%Y-%m-%dT%H:%M:%fZ','now','-24 hours')
+      AND EXISTS (SELECT 1 FROM orders WHERE room_id=r.id)
+      ORDER BY r.completed_at DESC,r.id DESC LIMIT 4`).bind(owner,owner,owner),
   ]);
   return { restaurants:restaurants.results,
     rooms:(rooms.results as (LifecycleRow & {id:string;title:string;mode:VotingMode})[]).map(row=>({...row,...mealLifecycle(row)})),
-    activeRooms:(active.results as HistoryRoom[]).map(row=>({...row,...mealLifecycle(row),isHost:!!row.isHost})),
+    activeRooms:(active.results as HomeMeal[]).map(row=>({...row,...mealLifecycle(row),isHost:!!row.isHost})),
+    recentFinishedRooms:(finished.results as HomeMeal[]).map(row=>({...row,...mealLifecycle(row),isHost:!!row.isHost})),
     activeRoomCount:Number((total.results[0] as {count:number}|undefined)?.count || 0) };
 }
 async function backfillHistory(db: D1Database, owner: string) {

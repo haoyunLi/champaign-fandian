@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import type { Catalog, Restaurant, Room, VotingMode } from '@/lib/types';
+import type { Catalog, HomeMeal, Restaurant, Room, VotingMode } from '@/lib/types';
 import { FoodOrders } from '@/components/food-orders';
 import { ReplayButton } from '@/components/replay-button';
 import { MealStatus, useMealPhase } from '@/components/meal-status';
@@ -20,6 +20,23 @@ async function api<T>(payload?: Record<string, unknown>, room?: string): Promise
 }
 function FoodArt({ small = false }: { small?: boolean }) {
   return <img className={small ? 'food-art small-art' : 'food-art'} src="/food-collage.png" alt="汉堡、炸鸡和小笼包的拼贴插画" width="1254" height="1254" />;
+}
+function HomeMealCard({ meal, open }: { meal: HomeMeal; open: (id: string) => void }) {
+  return <button className="active-meal" onClick={() => open(meal.id)}>
+    <span className="active-meal-main">
+      <span className="active-meal-title"><strong>{meal.title}</strong><MealStatus meal={meal}/></span>
+      <span className="active-meal-detail">{meal.isHost ? '我发起的' : '我参与或保存的'} · {meal.winner_name || `${meal.vote_count} 人已投`}</span>
+      {meal.phase !== 'voting' && <>
+        {meal.order_count ? <span className="home-order-counts">
+          <span className={meal.pending_count ? 'has-pending' : ''}>待认领 <b>{meal.pending_count}</b> 条</span>
+          <span className={meal.claimed_count ? 'has-claimed' : ''}>已认领 <b>{meal.claimed_count}</b> 条</span>
+          <span className={meal.delivered_count ? 'has-delivered' : ''}>已带回 <b>{meal.delivered_count}</b> 条</span>
+        </span> : <span className="active-meal-detail">还没有带饭登记</span>}
+        {meal.phase === 'finished' && <span className={`home-meal-outcome ${meal.completion_reason === 'delivered' ? 'all-delivered' : ''}`}>{meal.completion_reason === 'delivered' ? '已全部带回' : '已满 12 小时结束，未完成登记保留原状态'}</span>}
+      </>}
+    </span>
+    <span className="active-meal-cta">{meal.phase === 'voting' ? '继续投票' : '查看带饭'}<ArrowRight size={17}/></span>
+  </button>;
 }
 function RestaurantEditor({ item, close, saved }: { item: Partial<Restaurant>; close: () => void; saved: (c: Catalog) => void }) {
   const [name, setName] = useState(item.name || '');
@@ -93,10 +110,13 @@ function RoomView({ room, setRoom, home }: { room: Room; setRoom: (r: Room) => v
 export default function Home() {
   const [catalog, setCatalog] = useState<Catalog | null>(null), [room, setRoom] = useState<Room | null>(null);
   const [roomId, setRoomId] = useState(''), [loading, setLoading] = useState(true), [error, setError] = useState('');
+  const [catalogSyncError, setCatalogSyncError] = useState(false);
   const [editor, setEditor] = useState<Partial<Restaurant> | null>(null), [creating, setCreating] = useState(false), [title, setTitle] = useState('今晚吃什么？'), [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState<Restaurant | null>(null), [lastDeleted, setLastDeleted] = useState<Restaurant | null>(null), [deleteError, setDeleteError] = useState('');
   const [mode, setMode] = useState<VotingMode>('random');
   const catalogEpoch = useRef(0);
+  const loadSequence = useRef(0);
+  const pageLoading = useRef(true);
   const currentRoom = useRef('');
   const unavailableRoom = useRef('');
   const acceptRoom = useCallback((incoming: Room) => {
@@ -108,21 +128,42 @@ export default function Home() {
   }, []);
   const catalogChanged = useCallback((incoming: Catalog) => { catalogEpoch.current++; acceptCatalog(incoming); }, [acceptCatalog]);
   const load = useCallback(async (id: string) => {
-    const epoch = catalogEpoch.current;
+    const sequence = ++loadSequence.current;
+    pageLoading.current = true;
+    const epoch = ++catalogEpoch.current;
     currentRoom.current = id; setRoomId(id); setRoom(null); setLoading(true); setError('');
-    try { if (id) { const r = await api<Room>(undefined, id); if (currentRoom.current === id) { unavailableRoom.current = ''; acceptRoom(r); } } else { const c = await api<Catalog>(); if (!currentRoom.current && epoch === catalogEpoch.current) { acceptCatalog(c); setRoom(null); } } }
-    catch (e) { if (currentRoom.current === id) { if (id && e instanceof ApiError && e.status === 404) { unavailableRoom.current = id; setRoom(null); } setError((e as Error).message); } }
-    finally { if (currentRoom.current === id) setLoading(false); }
+    try { if (id) { const r = await api<Room>(undefined, id); if (currentRoom.current === id && sequence === loadSequence.current) { unavailableRoom.current = ''; acceptRoom(r); } } else { const c = await api<Catalog>(); if (!currentRoom.current && sequence === loadSequence.current && epoch === catalogEpoch.current) { acceptCatalog(c); setCatalogSyncError(false); setRoom(null); } } }
+    catch (e) { if (currentRoom.current === id && sequence === loadSequence.current && epoch === catalogEpoch.current) { if (id && e instanceof ApiError && e.status === 404) { unavailableRoom.current = id; setRoom(null); } setError((e as Error).message); } }
+    finally { if (sequence === loadSequence.current) { pageLoading.current = false; setLoading(false); } }
   }, [acceptRoom, acceptCatalog]);
   useEffect(() => { const update = () => load(new URLSearchParams(window.location.search).get('room') || ''); update(); window.addEventListener('popstate', update); return () => window.removeEventListener('popstate', update); }, [load]);
   useEffect(() => { if (!roomId) return; let cancelled = false; let running = false; const timer = window.setInterval(async () => { if (running || document.hidden) return; running = true; try { const r = await api<Room>(undefined, roomId); if (!cancelled) { unavailableRoom.current = ''; acceptRoom(r); setError(''); } } catch (e) { if (!cancelled) { if (e instanceof ApiError && e.status === 404) { unavailableRoom.current = roomId; setRoom(null); setError(e.message); } else setError('连接暂时中断，正在自动重连。'); } } finally { running = false; } }, 4000); return () => { cancelled = true; clearInterval(timer); }; }, [roomId, acceptRoom]);
-  useEffect(() => { if (roomId) return; let cancelled = false; const timer = window.setInterval(async () => { if(document.hidden) return; const epoch = catalogEpoch.current; try { const c = await api<Catalog>(); if(!cancelled && !currentRoom.current && epoch === catalogEpoch.current) acceptCatalog(c); } catch {} }, 8000); return () => {cancelled=true;clearInterval(timer);}; }, [roomId,acceptCatalog]);
+  useEffect(() => {
+    if (roomId) return;
+    let cancelled = false, running = false;
+    const refresh = async () => {
+      if (document.hidden || currentRoom.current || pageLoading.current || running) return;
+      running = true;
+      const epoch = ++catalogEpoch.current;
+      try {
+        const c = await api<Catalog>();
+        if (!cancelled && !currentRoom.current && epoch === catalogEpoch.current) { acceptCatalog(c); setCatalogSyncError(false); }
+      } catch { if (!cancelled && !currentRoom.current && epoch === catalogEpoch.current) setCatalogSyncError(true); }
+      finally { running = false; }
+    };
+    const timer = window.setInterval(refresh, 8000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => { cancelled = true; clearInterval(timer); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); };
+  }, [roomId, acceptCatalog]);
   function navigate(id = '') { window.history.pushState({}, '', id ? `/?room=${id}` : '/'); load(id); window.scrollTo({ top: 0, behavior: 'smooth' }); }
   const selected = catalog?.restaurants.filter(r => r.selected).length || 0;
   return <div className="app-shell"><header className="site-header"><a href="/" className="brand" onClick={e => { e.preventDefault(); navigate(); }}><Soup aria-hidden="true" /><span>饭点</span></a><span className="location">Champaign · Urbana</span><nav className="site-nav" aria-label="主导航"><a className="nav-link active" href={roomId ? '/' : '#restaurants'} onClick={e => { if (roomId) { e.preventDefault(); navigate(); } }}>餐馆清单</a><a className="nav-link" href="/history">历史记录</a></nav></header>
     <main className={room && room.phase!=='finished' ? 'has-mobile-action' : ''}>{error && <div className="error page-error" role="alert">{error}<Button variant="ghost" onClick={() => load(roomId)}>重试</Button></div>}
       {loading ? <div className="loading"><Loader2 className="spin" /><p>正在准备餐桌…</p></div> : roomId ? room && room.id === roomId && <RoomView key={room.id} room={room} setRoom={acceptRoom} home={() => navigate()} /> : catalog && <>
-        {!!catalog.activeRooms.length && <section className="active-meals"><div className="section-heading"><div><h2>正在进行的饭局</h2><p>我发起和参与的 · {catalog.activeRoomCount} 局进行中</p></div><a className="history-open" href="/history">全部记录<ArrowRight size={16}/></a></div><div className="active-meal-list">{catalog.activeRooms.map(r=><button className="active-meal" key={r.id} onClick={()=>navigate(r.id)}><span className="active-meal-main"><span className="active-meal-title"><strong>{r.title}</strong><MealStatus meal={r}/></span><span className="active-meal-detail">{r.isHost?'我发起的':'我参与或保存的'} · {r.winner_name || `${r.vote_count} 人已投`}{r.winner_name&&` · ${r.order_count} 条带饭`}</span></span><span className="active-meal-cta">{r.phase==='voting'?'继续投票':'查看带饭'}<ArrowRight size={17}/></span></button>)}</div>{catalog.activeRoomCount>catalog.activeRooms.length&&<a href="/history" className="history-open">还有 {catalog.activeRoomCount-catalog.activeRooms.length} 局，查看全部记录</a>}</section>}
+        {catalogSyncError && <p className="home-sync-error" role="status">带饭状态暂未更新，正在自动重连。恢复连接后会自动更新。</p>}
+        {!!catalog.activeRooms.length && <section className="active-meals"><div className="section-heading"><div><h2>正在进行的饭局</h2><p>我发起和参与的 · {catalog.activeRoomCount} 局进行中</p><p className="home-sync-note">带饭状态每 8 秒自动更新</p></div><a className="history-open" href="/history">全部记录<ArrowRight size={16}/></a></div><div className="active-meal-list">{catalog.activeRooms.map(r => <HomeMealCard key={r.id} meal={r} open={navigate}/>)}</div>{catalog.activeRoomCount>catalog.activeRooms.length&&<a href="/history" className="history-open">还有 {catalog.activeRoomCount-catalog.activeRooms.length} 局，查看全部记录</a>}</section>}
+        {!!catalog.recentFinishedRooms.length && <section className="active-meals recent-finished-meals"><div className="section-heading"><div><h2>最近结束的带饭</h2><p>最近 24 小时 · 最多展示 4 局</p></div><a className="history-open" href="/history">全部记录<ArrowRight size={16}/></a></div><div className="active-meal-list">{catalog.recentFinishedRooms.map(r => <HomeMealCard key={r.id} meal={r} open={navigate}/>)}</div></section>}
         <section className="intro"><div className="intro-copy"><h1>今天吃什么？</h1><p>自己投票，或随机抽签，<br className="mobile-break" />票数最多的就是今晚的目的地。</p></div><FoodArt /><div className="intro-action"><Button className="primary" disabled={selected < 2 || busy} onClick={() => { setError(''); setCreating(true); }}>创建一轮投票 <ArrowRight /></Button><span>{selected >= 2 ? '建好后，把链接发到微信群' : '请先选中至少两家餐馆'}</span></div></section>
         <section id="restaurants" className="catalog"><div className="section-heading"><div><h2>餐馆清单</h2><p>共享餐馆库 · 本轮已选 {selected} 家</p></div><Button variant="outline" className="secondary" onClick={() => setEditor({})}><Plus />添加餐馆</Button></div>
           {lastDeleted && <div className="delete-notice" role="status"><span>已删除「{lastDeleted.name}」</span><Button variant="ghost" disabled={busy} onClick={async () => { setBusy(true); setError(''); try { const restored = await api<Catalog>({ action: 'restoreRestaurant', id: lastDeleted.id }); catalogChanged({ ...restored, restaurants: restored.restaurants.map(r => r.id === lastDeleted.id ? { ...r, selected: lastDeleted.selected } : r) }); setLastDeleted(null); } catch(e) { setError((e as Error).message); } finally { setBusy(false); } }}><Undo2 />撤销</Button></div>}
