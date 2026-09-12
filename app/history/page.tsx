@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowRight, History, Loader2, RotateCcw, Soup, Trash2, Undo2
 import { Button } from '@/components/ui/button';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import type { HistoryPage, HistoryRoom } from '@/lib/types';
+import { MealStatus } from '@/components/meal-status';
 
 async function request<T>(url: string, payload?: Record<string, unknown>): Promise<T> {
   const response = await fetch(url, payload ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : { cache: 'no-store' });
@@ -89,7 +90,7 @@ export default function HistoryView() {
       <div className="history-list" aria-busy={loading}>
         {rows.map(item => <article className="history-row" key={item.id}>
           <div className="history-info">
-            <div className="history-title"><h2>{item.title}</h2><span className={`status ${item.status === 'closed' ? 'ended' : ''}`}>{item.status === 'closed' ? '已结束' : '投票中'}</span></div>
+            <div className="history-title"><h2>{item.title}</h2><MealStatus meal={item} /></div>
             <p className="history-date"><time dateTime={item.created_at}>{dateLabel(item.created_at)}</time> 发起{item.deleted_at && <> · <time dateTime={item.deleted_at}>{dateLabel(item.deleted_at)}</time> {item.isHost ? '删除' : '移除'}</>}</p>
             <p className="history-result">{item.winner_name ? <>选定餐馆 <strong>{item.winner_name}</strong></> : '餐馆尚未确定'}</p>
             <p className="history-counts"><b className="history-role">{item.isHost ? '我发起的' : '参与或保存'}</b><span>·</span>{item.mode === 'manual' ? '自主投票' : '随机抽签'}<span>·</span>{item.vote_count} 人投票<span>·</span>{item.order_count} 条带饭登记</p>

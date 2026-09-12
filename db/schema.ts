@@ -9,6 +9,7 @@ export const rooms = sqliteTable('rooms', {
   id: text('id').primaryKey(), owner: text('owner').notNull(), title: text('title').notNull(),
   status: text('status').notNull().default('open'), winnerId: text('winner_id'),
   mode: text('mode').notNull().default('random'),
+  decidedAt: text('decided_at'), completedAt: text('completed_at'), completionReason: text('completion_reason'),
   createdAt: text('created_at').notNull(), revision: integer('revision').notNull().default(0), deletedAt: text('deleted_at'),
 }, t => [index('idx_rooms_owner_created').on(t.owner, t.createdAt)]);
 export const candidates = sqliteTable('candidates', {

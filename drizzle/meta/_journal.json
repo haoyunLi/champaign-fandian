@@ -43,6 +43,13 @@
       "when": 1789194771094,
       "tag": "0005_loving_rage",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1789195429700,
+      "tag": "0006_busy_lucky_pierre",
+      "breakpoints": true
     }
   ]
 }
