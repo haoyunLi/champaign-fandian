@@ -26,6 +26,7 @@ export const votes = sqliteTable('votes', {
 export const orders = sqliteTable('orders', {
   id: text('id').primaryKey(), roomId: text('room_id').notNull().references(() => rooms.id), owner: text('owner').notNull(),
   nickname: text('nickname').notNull(), dish: text('dish').notNull(), quantity: integer('quantity').notNull(), note: text('note').notNull().default(''),
+  creationRequestHash: text('creation_request_hash'),
   status: text('status').notNull().default('pending'), revision: integer('revision').notNull().default(0), claimant: text('claimant'), claimantName: text('claimant_name'), createdAt: text('created_at').notNull(),
 }, t => [index('idx_orders_room_created').on(t.roomId,t.createdAt), index('idx_orders_owner_room').on(t.owner,t.roomId), index('idx_orders_claimant_room').on(t.claimant,t.roomId)]);
 export const roomHistory = sqliteTable('room_history', {
@@ -34,4 +35,9 @@ export const roomHistory = sqliteTable('room_history', {
 }, t => [primaryKey({columns:[t.owner,t.roomId]})]);
 export const visitorPreferences = sqliteTable('visitor_preferences', {
   owner: text('owner').primaryKey(), nickname: text('nickname').notNull(),
+});
+// Retain only request identities after cancellation so late retries cannot recreate an order.
+export const cancelledOrderRequests = sqliteTable('cancelled_order_requests', {
+  id: text('id').primaryKey(), roomId: text('room_id').notNull().references(() => rooms.id),
+  owner: text('owner').notNull(), cancelledAt: text('cancelled_at').notNull(),
 });

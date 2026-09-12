@@ -1,13 +1,29 @@
 import { database } from '@/lib/game-db';
 import { seeds } from '@/lib/seeds';
+import { PayloadTooLargeError, readRequestText } from '@/lib/request-body';
 import { ACTIVE_DELIVERY_SQL, finishMeal, mealLifecycle, settleMeals, type LifecycleRow } from '@/lib/meal-lifecycle';
 import type { Restaurant, Room, Vote, FoodOrder, HistoryRoom, HistoryPage, HomeMeal, VotingMode } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 class UserError extends Error { constructor(message: string, public status = 400, public code?: string, public room?: Room) { super(message); } }
-function foodRetryAccepted(room: Room, action: unknown, orderId: string, expectedRevision?: unknown) {
+type OrderSubmission = {nickname:string;dish:string;quantity:number;note:string};
+function orderSubmission(body: Record<string,unknown>): OrderSubmission {
+  const nickname=clean(body.nickname,24,'群昵称'),dish=clean(body.dish,100,'菜名'),note=clean(body.note,240,'备注',false),quantity=body.quantity;
+  if(typeof quantity!=='number'||!Number.isInteger(quantity)||quantity<1||quantity>20) throw new UserError('份数请填写 1–20。');
+  return {nickname,dish,quantity,note};
+}
+async function foodRetryAccepted(db: D1Database, room: Room, action: unknown, orderId: string, expectedRevision?: unknown, submission?: OrderSubmission) {
   const existing=room.orders.find(order=>order.id===orderId);
-  return (action==='order' && existing?.isMine) || (action==='deliver' && existing?.status==='delivered' && existing.canManage && Number.isInteger(expectedRevision) && existing.revision===(expectedRevision as number)+1);
+  if(action==='order' && existing?.isMine && submission) {
+    const saved=await db.prepare('SELECT creation_request_hash FROM orders WHERE id=? AND room_id=?').bind(orderId,room.id).first<{creation_request_hash:string|null}>();
+    // Keep the original fingerprint after later edits, so the original request can still retry safely.
+    const matches=saved?.creation_request_hash
+      ? saved.creation_request_hash===await hashText(JSON.stringify(submission))
+      : Object.entries(submission).every(([key,value])=>existing[key as keyof FoodOrder]===value);
+    if(!matches) throw new UserError('这次登记已保存过，重试内容与首次提交不同。请查看「我的登记」，再使用编辑修改。',409,'ORDER_REQUEST_CONFLICT',room);
+    return true;
+  }
+  return action==='deliver' && existing?.status==='delivered' && existing.canManage && Number.isInteger(expectedRevision) && existing.revision===(expectedRevision as number)+1;
 }
 async function hashText(value: string) {
   const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value));
@@ -145,9 +161,9 @@ async function handle(request: Request) {
       result=room ? await roomState(db,clean(room,64,'投票编号'),owner) : url.searchParams.has('history') ? await historyPage(db,owner,url) : await catalog(db,owner);
     } else {
       const origin=request.headers.get('origin');
-      if (origin && origin!==url.origin) throw new UserError('请在投票页面内操作。',403);
-      const raw=await request.text();
-      if (raw.length>16384) throw new UserError('提交内容过长。',413);
+      if ((origin && origin!==url.origin) || request.headers.get('sec-fetch-site')==='cross-site') throw new UserError('请在投票页面内操作。',403);
+      if(request.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='application/json') throw new UserError('请使用投票页面提交内容。',415);
+      const raw=await readRequestText(request);
       let body: Record<string,unknown>;
       try { body=JSON.parse(raw); } catch { throw new UserError('提交内容无效。'); }
       if (!body || typeof body!=='object' || Array.isArray(body)) throw new UserError('提交内容无效。');
@@ -312,24 +328,25 @@ async function handle(request: Request) {
         if(room.status!=='closed') throw new UserError('餐馆确定后才能登记带饭。',409);
         // Retrying the final delivery or an already accepted order remains safe after completion.
         const retryId=clean(body.orderId,64,'带饭编号');
-        if(foodRetryAccepted(room,body.action,retryId,body.expectedRevision)) result=room;
+        const submission=body.action==='order' ? orderSubmission(body) : undefined;
+        if(await foodRetryAccepted(db,room,body.action,retryId,body.expectedRevision,submission)) result=room;
         else if(room.phase==='finished') throw mealFinishedError(room);
         else {
         let statement: D1PreparedStatement;
+        let cancelledRequest: D1PreparedStatement | undefined;
         if(body.action==='order') {
+          if(await db.prepare('SELECT id FROM cancelled_order_requests WHERE id=?').bind(retryId).first()) throw new UserError('这条登记已经取消，不能通过重试恢复。需要带饭时请重新填写一条新登记。',409,'ORDER_CANCELLED',room);
           if(room.orders_stopped_at) throw new UserError('本轮已停止加单，已有登记仍可继续认领和带回。',409,'ORDERS_STOPPED',room);
-          const nickname=clean(body.nickname,24,'群昵称'),dish=clean(body.dish,100,'菜名'),note=clean(body.note,240,'备注',false);
-          const quantity=body.quantity;
-          if(typeof quantity!=='number'||!Number.isInteger(quantity)||quantity<1||quantity>20) throw new UserError('份数请填写 1–20。');
+          const {nickname,dish,quantity,note}=submission!;
           const orderId=clean(body.orderId,64,'登记编号');
           if(!/^[a-f0-9-]{36}$/.test(orderId)) throw new UserError('登记编号无效。');
           // A client-generated request ID makes retrying a submitted order safe.
-          statement=db.prepare(`INSERT OR IGNORE INTO orders (id,room_id,owner,nickname,dish,quantity,note,status,created_at) SELECT ?,?,?,?,?,?,?,'pending',? WHERE (SELECT COUNT(*) FROM orders WHERE room_id=?)<200 AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND orders_stopped_at IS NULL AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,owner,nickname,dish,quantity,note,new Date().toISOString(),id,id);
+          statement=db.prepare(`INSERT OR IGNORE INTO orders (id,room_id,owner,nickname,dish,quantity,note,status,created_at,creation_request_hash) SELECT ?,?,?,?,?,?,?,'pending',?,? WHERE NOT EXISTS (SELECT 1 FROM cancelled_order_requests WHERE id=?) AND (SELECT COUNT(*) FROM orders WHERE room_id=?)<200 AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND orders_stopped_at IS NULL AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,owner,nickname,dish,quantity,note,new Date().toISOString(),await hashText(JSON.stringify(submission)),orderId,id,id);
         } else {
           const orderId=clean(body.orderId,64,'带饭编号');
           const order=room.orders.find(o=>o.id===orderId);
           if(!order) throw new UserError('这条带饭登记已取消，请刷新。',404);
-          if(body.action==='editOrder' || body.action==='claim' || body.action==='deliver' || body.action==='release') {
+          if(body.action==='editOrder' || body.action==='claim' || body.action==='deliver' || body.action==='release' || body.action==='cancelOrder') {
             if(!Number.isInteger(body.expectedRevision)) throw new UserError('页面已更新，请刷新页面后再操作。',409,'ORDER_CHANGED',room);
             if(body.expectedRevision!==order.revision) throw new UserError('这条登记已更新，请查看最新内容后重试。',409,'ORDER_CHANGED',room);
           }
@@ -347,7 +364,12 @@ async function handle(request: Request) {
           } else if(body.action==='cancelOrder') {
             if(!order.isMine) throw new UserError('只能取消自己的带饭登记。',403);
             if(order.status!=='pending') throw new UserError('已有朋友认领，请在群里联系带饭人。',409);
-            statement=db.prepare(`DELETE FROM orders WHERE id=? AND room_id=? AND owner=? AND status='pending' AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,owner,id);
+            // The tombstone and deletion share the same transaction and revision check.
+            cancelledRequest=db.prepare(`INSERT OR IGNORE INTO cancelled_order_requests (id,room_id,owner,cancelled_at)
+              SELECT id,room_id,owner,strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM orders
+              WHERE id=? AND room_id=? AND owner=? AND status='pending' AND revision=?
+              AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,owner,body.expectedRevision,id);
+            statement=db.prepare(`DELETE FROM orders WHERE id=? AND room_id=? AND owner=? AND status='pending' AND revision=? AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,owner,body.expectedRevision,id);
           } else {
             if(!order.canManage) throw new UserError('只有带饭人或本轮发起人可以操作。',403);
             statement=body.action==='deliver' ? db.prepare(`UPDATE orders SET status='delivered',revision=revision+1 WHERE id=? AND room_id=? AND status='claimed' AND revision=? AND (claimant=? OR EXISTS(SELECT 1 FROM rooms WHERE id=? AND owner=?)) AND (?=1 OR EXISTS (SELECT 1 FROM orders other WHERE other.room_id=orders.room_id AND other.id<>orders.id AND other.status<>'delivered')) AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,body.expectedRevision,owner,id,owner,body.confirmFinish===true?1:0,id) : db.prepare(`UPDATE orders SET status='pending',claimant=NULL,claimant_name=NULL,revision=revision+1 WHERE id=? AND room_id=? AND status='claimed' AND revision=? AND (claimant=? OR EXISTS(SELECT 1 FROM rooms WHERE id=? AND owner=?)) AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,body.expectedRevision,owner,id,owner,id);
@@ -362,20 +384,21 @@ async function handle(request: Request) {
             UNION SELECT claimant AS owner,room_id,created_at FROM orders WHERE id=? AND room_id=? AND claimant IS NOT NULL
           ) people JOIN rooms r ON r.id=people.room_id WHERE r.owner<>people.owner AND r.deleted_at IS NULL`)
           .bind(normalizedOrderId,id,normalizedOrderId,id);
-        const changed=await db.batch([previousParticipants,statement,db.prepare('UPDATE rooms SET revision=revision+1 WHERE id=? AND deleted_at IS NULL').bind(id),recordParticipation(db,id,owner),
+        const changed=await db.batch([previousParticipants,...(cancelledRequest?[cancelledRequest]:[]),statement,db.prepare('UPDATE rooms SET revision=revision+1 WHERE id=? AND deleted_at IS NULL').bind(id),recordParticipation(db,id,owner),
           ...(body.action==='order' || body.action==='claim' ? [db.prepare(`INSERT INTO visitor_preferences (owner,nickname)
             SELECT ?,${body.action==='order'?'nickname':'claimant_name'} FROM orders WHERE id=? AND room_id=? AND ${body.action==='order'?'owner':'claimant'}=?
             ON CONFLICT(owner) DO UPDATE SET nickname=excluded.nickname`).bind(owner,normalizedOrderId,id,owner)] : []),
           finishMeal(db,'id=?',[id])]);
         const current=await roomState(db,id,owner);
-        if(!changed[1].meta.changes && !foodRetryAccepted(current,body.action,normalizedOrderId,body.expectedRevision)) {
+        if(!changed[cancelledRequest?2:1].meta.changes && !await foodRetryAccepted(db,current,body.action,normalizedOrderId,body.expectedRevision,submission)) {
           if(current.phase==='finished') throw mealFinishedError(current);
           const latest=current.orders.find(o=>o.id===normalizedOrderId);
+          if(body.action==='order' && await db.prepare('SELECT id FROM cancelled_order_requests WHERE id=?').bind(normalizedOrderId).first()) throw new UserError('这条登记已经取消，请重新填写一条新登记。',409,'ORDER_CANCELLED',current);
           if(body.action==='order' && current.orders_stopped_at) throw new UserError('本轮刚刚停止加单，填写内容已保留。',409,'ORDERS_STOPPED',current);
           if((body.action==='deliver'||body.action==='release')&&latest?.revision!==body.expectedRevision) throw new UserError('这份登记或认领人已变化，请查看最新内容后重试。',409,'ORDER_CHANGED',current);
           if(body.action==='deliver' && body.confirmFinish!==true && latest?.status==='claimed' && latest.canManage && current.orders.filter(o=>o.status!=='delivered').length===1)
             throw new UserError('这是最后一份带饭，确认带回后本轮将结束。',409,'FINAL_DELIVERY_CONFIRM_REQUIRED',current);
-          if(body.action==='editOrder' || body.action==='claim') throw new UserError('这条登记刚被修改或认领，请查看最新内容后重试。',409,'ORDER_CHANGED',current);
+          if(body.action==='editOrder' || body.action==='claim' || body.action==='cancelOrder') throw new UserError('这条登记刚被修改或认领，请查看最新内容后重试。',409,'ORDER_CHANGED',current);
           throw new UserError(body.action==='order' ? '本轮带饭清单已满，请在群里联系发起人。' : '这条登记刚被更新，请查看最新清单。',409);
         }
         result=current;
@@ -386,6 +409,7 @@ async function handle(request: Request) {
     if(cookie) headers['Set-Cookie']=cookie;
     return Response.json(result,{headers});
   } catch(error) {
+    if(error instanceof PayloadTooLargeError) error=new UserError('提交内容过长。',413);
     if(!(error instanceof UserError)) console.error('Fandian request failed',error);
     const headers: Record<string,string>={'Cache-Control':'no-store'}; if(cookie) headers['Set-Cookie']=cookie;
     return Response.json({error:error instanceof UserError ? error.message : '暂时连接不上，请稍后重试。你的填写内容仍然保留。',...(error instanceof UserError && error.code ? {code:error.code,room:error.room} : {})},{status:error instanceof UserError ? error.status : 503,headers});

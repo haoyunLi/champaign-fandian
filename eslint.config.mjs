@@ -5,6 +5,17 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
+  {
+    files: ['app/**/*.{ts,tsx}', 'components/replay-button.tsx'],
+    rules: {
+      // Room navigation uses popstate plus a query-string room ID. Full navigation
+      // from other pages deliberately remounts that controller and its identity.
+      '@next/next/no-html-link-for-pages': 'off',
+      '@next/next/no-location-assign-relative-destination': 'off',
+      // The single illustration is a fixed local asset, with explicit dimensions.
+      '@next/next/no-img-element': 'off',
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:

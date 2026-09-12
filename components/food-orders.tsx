@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Copy, HandHeart, Loader2, LockKeyhole, Pencil, Plus, ShoppingBag, Undo2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -9,6 +9,7 @@ import type { FoodOrder, Room } from '@/lib/types';
 import { deadlineLabel, useMealPhase } from '@/components/meal-status';
 
 type Filter='all'|'pending'|'carrying'|'mine';
+type OrderAttempt={orderId:string;nickname:string;dish:string;quantity:number;note:string};
 export function FoodOrders({ room, update }: { room: Room; update: (r: Room) => void }) {
   const [editor,setEditor]=useState<FoodOrder|'new'|null>(null);
   const [claim,setClaim]=useState<FoodOrder|null>(null), [cancel,setCancel]=useState<FoodOrder|null>(null), [delivery,setDelivery]=useState<FoodOrder|null>(null);
@@ -19,6 +20,25 @@ export function FoodOrders({ room, update }: { room: Room; update: (r: Room) => 
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[filter,setFilter]=useState<Filter>('all');
   const [copyText,setCopyText]=useState<string|null>(null),[copied,setCopied]=useState(false);
   const orderId=useRef(''),busyRef=useRef(false),copyRef=useRef<HTMLTextAreaElement>(null);
+  const orderAttempt=useRef<OrderAttempt|null>(null);
+  const [pendingOrder,setPendingOrder]=useState(false);
+  const pendingKey=`fd_pending_order_${room.id}`;
+  const clearOrderAttempt=useCallback(()=>{
+    orderAttempt.current=null;setPendingOrder(false);
+    try{sessionStorage.removeItem(pendingKey);}catch{}
+  },[pendingKey]);
+  function restoreOrderDraft(value:OrderAttempt) {
+    orderId.current=value.orderId;setNickname(value.nickname);setDish(value.dish);setQuantity(String(value.quantity));setNote(value.note);
+  }
+  useEffect(()=>{
+    try{
+      const value=JSON.parse(sessionStorage.getItem(pendingKey)||'null');
+      if(value&&typeof value.orderId==='string'&&/^[a-f0-9-]{36}$/.test(value.orderId)&&typeof value.nickname==='string'&&typeof value.dish==='string'&&typeof value.note==='string'&&Number.isInteger(value.quantity)&&value.quantity>=1&&value.quantity<=20){
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- Restore an unresolved browser-stored submission after SSR.
+        orderAttempt.current=value;setPendingOrder(true);restoreOrderDraft(value);setEditor('new');
+      }
+    }catch{}
+  },[pendingKey]);
   const phase=useMealPhase(room),finished=phase==='finished';
   const stopped=!!room.orders_stopped_at;
   const winner=room.candidates.find(r=>r.id===room.winner_id);
@@ -33,13 +53,14 @@ export function FoodOrders({ room, update }: { room: Room; update: (r: Room) => 
   const claimChanged=!!claim && (!currentClaim || currentClaim.status!=='pending' || currentClaim.revision!==claim.revision);
   const currentDelivery=delivery ? room.orders.find(o=>o.id===delivery.id) : undefined;
   const deliveryChanged=!!delivery && (!currentDelivery || currentDelivery.revision!==delivery.revision);
+  const currentCancel=cancel ? room.orders.find(o=>o.id===cancel.id) : undefined;
+  const cancelChanged=!!cancel && (!currentCancel || currentCancel.status!=='pending' || currentCancel.revision!==cancel.revision);
   const lastDelivery=!!delivery && unfinished.length===1 && unfinished[0].id===delivery.id;
-  useEffect(()=>{if(finished){setClaim(null);setCancel(null);setDelivery(null);}if(finished||stopped)setStopConfirm(false);},[finished,stopped]);
-  useEffect(()=>{if(editor==='new'&&room.orders.some(o=>o.id===orderId.current&&o.isMine)){setEditor(null);setFilter('mine');}},[editor,room.orders]);
+  useEffect(()=>{if(editor==='new'&&room.orders.some(o=>o.id===orderId.current&&o.isMine)){clearOrderAttempt();setEditor(null);setFilter('mine');}},[editor,room.orders,clearOrderAttempt]);
   function openEditor(value:FoodOrder|'new') {
     if(value==='new'&&(stopped||finished))return;
     setError(''); setEditor(value);
-    if(value==='new'){if(!nickname)setNickname(room.preferred_nickname||room.myVote?.nickname||'');orderId.current=crypto.randomUUID();setDish('');setQuantity('1');setNote('');}
+    if(value==='new'){if(orderAttempt.current){restoreOrderDraft(orderAttempt.current);return;}if(!nickname)setNickname(room.preferred_nickname||room.myVote?.nickname||'');orderId.current=crypto.randomUUID();setDish('');setQuantity('1');setNote('');}
     else {setDish(value.dish);setQuantity(String(value.quantity));setNote(value.note);}
   }
   async function act(payload:Record<string,unknown>) {
@@ -49,6 +70,7 @@ export function FoodOrders({ room, update }: { room: Room; update: (r: Room) => 
       const response=await fetch('/api/game',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room:room.id,...payload})});
       const value=await response.json() as Room & {error?:string;code?:string;room?:Room};
       if(!response.ok){
+        if(payload.action==='order'&&response.status<500)clearOrderAttempt();
         if(value.room) update(value.room);
         if(value.code==='FINAL_DELIVERY_CONFIRM_REQUIRED') {
           setDelivery(value.room?.orders.find(o=>o.id===payload.orderId)||null);
@@ -79,25 +101,36 @@ export function FoodOrders({ room, update }: { room: Room; update: (r: Room) => 
     </article>)}</div>}
     {error&&!editor&&!claim&&!cancel&&!delivery&&<p className="error" role="alert">{error}</p>}
     <Dialog open={!!editor} onOpenChange={open=>!open&&!busy&&setEditor(null)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>{editor==='new'?'我不去，帮我带饭':'修改我的带饭'}</DialogTitle><DialogDescription>{winner?.name} · {editor==='new'?'填写具体菜名，方便朋友下单。':'保存后保留这条登记，无需取消重填。'}</DialogDescription></DialogHeader>
-      <form onSubmit={async e=>{e.preventDefault();if(finished||editChanged||(editor==='new'&&stopped))return;const payload=editor==='new'?{action:'order',orderId:orderId.current,nickname}:{action:'editOrder',orderId:editor?.id,expectedRevision:editor?.revision};if(await act({...payload,dish,quantity:Number(quantity),note})){setEditor(null);setFilter('mine');}}}>
-        {editor==='new'&&<label className="field">你的群昵称<Input required maxLength={24} value={nickname} onChange={e=>setNickname(e.target.value)}/></label>}
-        <label className="field">想吃什么<Input required maxLength={100} value={dish} onChange={e=>setDish(e.target.value)} placeholder="例如：宫保鸡丁盒饭"/></label>
-        <label className="field">份数<Input type="number" required min={1} max={20} step={1} inputMode="numeric" value={quantity} onChange={e=>setQuantity(e.target.value)}/></label>
-        <label className="field">备注 <span>选填</span><Textarea maxLength={240} value={note} onChange={e=>setNote(e.target.value)} placeholder="口味、忌口、取餐地点"/></label>
+      <form onSubmit={async e=>{
+        e.preventDefault();if(busyRef.current||finished||editChanged||(editor==='new'&&stopped))return;
+        let payload:Record<string,unknown>;
+        if(editor==='new'){
+          const attempt=orderAttempt.current||{orderId:orderId.current,nickname,dish,quantity:Number(quantity),note};
+          orderAttempt.current=attempt;setPendingOrder(true);
+          try{sessionStorage.setItem(pendingKey,JSON.stringify(attempt));}catch{}
+          payload={action:'order',...attempt};
+        }else payload={action:'editOrder',orderId:editor?.id,expectedRevision:editor?.revision,dish,quantity:Number(quantity),note};
+        if(await act(payload)){if(editor==='new')clearOrderAttempt();setEditor(null);setFilter('mine');}
+      }}>
+        {editor==='new'&&<label className="field">你的群昵称<Input disabled={busy} readOnly={pendingOrder} required maxLength={24} value={nickname} onChange={e=>setNickname(e.target.value)}/></label>}
+        <label className="field">想吃什么<Input disabled={busy} readOnly={editor==='new'&&pendingOrder} required maxLength={100} value={dish} onChange={e=>setDish(e.target.value)} placeholder="例如：宫保鸡丁盒饭"/></label>
+        <label className="field">份数<Input disabled={busy} readOnly={editor==='new'&&pendingOrder} type="number" required min={1} max={20} step={1} inputMode="numeric" value={quantity} onChange={e=>setQuantity(e.target.value)}/></label>
+        <label className="field">备注 <span>选填</span><Textarea disabled={busy} readOnly={editor==='new'&&pendingOrder} maxLength={240} value={note} onChange={e=>setNote(e.target.value)} placeholder="口味、忌口、取餐地点"/></label>
+        {editor==='new'&&pendingOrder&&!busy&&!finished&&!stopped&&<p className="fine-print" role="status">正在确认上次登记结果。重试会找回同一条登记；确认保存后，可在「我的登记」中编辑。</p>}
         {finished?<p className="error" role="alert">本轮已结束，不能保存。填写内容已保留，仍可复制。</p>:editChanged&&<p className="error" role="alert">登记已被修改、认领或取消，暂未覆盖你的填写内容。{currentEdit?.status==='pending'&&<Button type="button" variant="ghost" onClick={()=>openEditor(currentEdit)}>读取最新内容</Button>}</p>}
         {!finished&&editor==='new'&&stopped&&<p className="error" role="alert">本轮已停止加单，不能提交新登记。填写内容已保留，可复制后与带饭人联系。</p>}
-        {error&&<p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy||finished||editChanged||(editor==='new'&&stopped)}>{busy?<Loader2 className="spin"/>:<Check/>}{busy?'正在保存…':editor==='new'?'加入带饭清单':'保存修改'}</Button>
+        {error&&<p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy||finished||editChanged||(editor==='new'&&stopped)}>{busy?<Loader2 className="spin"/>:<Check/>}{busy?'正在保存…':editor==='new'?pendingOrder?'重试，找回上次登记':'加入带饭清单':'保存修改'}</Button>
         <p className="fine-print">未认领前可以修改。菜品是否有售、价格和付款请在群里确认。</p>
       </form>
     </DialogContent></Dialog>
-    <Dialog open={!!claim} onOpenChange={open=>!open&&!busy&&setClaim(null)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>这份我来带</DialogTitle><DialogDescription>帮 {claim?.nickname} 带 {claim?.dish} × {claim?.quantity}。{claim?.note&&`备注：${claim.note}`}</DialogDescription></DialogHeader>
+    <Dialog open={!!claim&&!finished} onOpenChange={open=>!open&&!busy&&setClaim(null)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>这份我来带</DialogTitle><DialogDescription>帮 {claim?.nickname} 带 {claim?.dish} × {claim?.quantity}。{claim?.note&&`备注：${claim.note}`}</DialogDescription></DialogHeader>
       {claimChanged?<div><p className="error" role="alert">这份登记已更新，请先查看最新菜名和备注。</p>{currentClaim?.status==='pending'&&<Button variant="outline" className="secondary full" onClick={()=>{setClaim(currentClaim);setError('');}}>查看最新登记</Button>}</div>:null}
       <form onSubmit={async e=>{e.preventDefault();if(!claim||claimChanged)return;if(await act({action:'claim',orderId:claim.id,expectedRevision:claim.revision,nickname:carrier})){setClaim(null);setFilter('carrying');}}}><label className="field">带饭人的群昵称<Input required maxLength={24} value={carrier} onChange={e=>setCarrier(e.target.value)}/></label>{error&&<p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy||finished||claimChanged}>确认，我来带</Button></form>
     </DialogContent></Dialog>
-    <Dialog open={!!cancel} onOpenChange={open=>!open&&!busy&&setCancel(null)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>取消这条带饭登记？</DialogTitle><DialogDescription>{cancel?.dish} × {cancel?.quantity} 将移除。如果只是改菜，请使用「编辑」。若其余登记均已带回，取消后本轮也会结束。</DialogDescription></DialogHeader>{error&&<p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy||finished} onClick={async()=>{if(await act({action:'cancelOrder',orderId:cancel?.id}))setCancel(null);}}>确认取消</Button></DialogContent></Dialog>
-    <Dialog open={!!delivery} onOpenChange={open=>!open&&!busy&&setDelivery(null)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>{deliveryChanged?'带饭登记已更新':lastDelivery?'最后一份也带回了吗？':'确认这份已带回？'}</DialogTitle><DialogDescription>{delivery?.nickname} 的 {delivery?.dish} × {delivery?.quantity}。{lastDelivery?'确认后本轮结束，不能再加单。':'有其他尚未完成的登记，本次只标记这份已带回。'}</DialogDescription></DialogHeader>{deliveryChanged&&<div><p className="error" role="alert">菜品或认领状态已变化，请先查看最新内容，再确认带回。</p>{currentDelivery?.status==='claimed'&&currentDelivery.canManage&&<Button variant="outline" className="secondary full" onClick={()=>{setDelivery(currentDelivery);setError('');}}>查看最新登记</Button>}</div>}{error&&<p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy||finished||deliveryChanged||currentDelivery?.status!=='claimed'||!currentDelivery?.canManage} onClick={async()=>{if(await act({action:'deliver',orderId:delivery?.id,expectedRevision:delivery?.revision,confirmFinish:lastDelivery}))setDelivery(null);}}>{busy?'正在保存…':lastDelivery?'确认带回并结束饭局':'确认已带回'}</Button></DialogContent></Dialog>
-    <Dialog open={stopConfirm} onOpenChange={open=>!busy&&setStopConfirm(open)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>开始下单，停止加单？</DialogTitle><DialogDescription>停止后不再接收新登记，本轮不能重新开放加单。已有 {room.orders.length} 条登记，其中 {counts.pending} 条待认领，仍可继续修改、认领和带回。饭局不会立即结束，原来的 12 小时截止时间保持不变。</DialogDescription></DialogHeader>{!room.canStopOrders&&<p className="error" role="alert">你的认领状态已变化，当前不能停止加单。</p>}{error&&<p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy||finished||stopped||!room.canStopOrders} onClick={async()=>{if(await act({action:'stopOrders'}))setStopConfirm(false);}}>{busy?'正在停止…':'确认停止加单'}</Button></DialogContent></Dialog>
+    <Dialog open={!!cancel&&!finished} onOpenChange={open=>!open&&!busy&&setCancel(null)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>取消这条带饭登记？</DialogTitle><DialogDescription>{cancel?.dish} × {cancel?.quantity} 将移除。如果只是改菜，请使用「编辑」。若其余登记均已带回，取消后本轮也会结束。</DialogDescription></DialogHeader>{cancelChanged&&<div><p className="error" role="alert">这份登记已更新，请先查看最新内容，再决定是否取消。</p>{currentCancel?.status==='pending'&&currentCancel.isMine&&<Button variant="outline" className="secondary full" onClick={()=>{setCancel(currentCancel);setError('');}}>查看最新登记</Button>}</div>}{error&&<p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy||finished||cancelChanged} onClick={async()=>{if(await act({action:'cancelOrder',orderId:cancel?.id,expectedRevision:cancel?.revision}))setCancel(null);}}>确认取消</Button></DialogContent></Dialog>
+    <Dialog open={!!delivery&&!finished} onOpenChange={open=>!open&&!busy&&setDelivery(null)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>{deliveryChanged?'带饭登记已更新':lastDelivery?'最后一份也带回了吗？':'确认这份已带回？'}</DialogTitle><DialogDescription>{delivery?.nickname} 的 {delivery?.dish} × {delivery?.quantity}。{lastDelivery?'确认后本轮结束，不能再加单。':'有其他尚未完成的登记，本次只标记这份已带回。'}</DialogDescription></DialogHeader>{deliveryChanged&&<div><p className="error" role="alert">菜品或认领状态已变化，请先查看最新内容，再确认带回。</p>{currentDelivery?.status==='claimed'&&currentDelivery.canManage&&<Button variant="outline" className="secondary full" onClick={()=>{setDelivery(currentDelivery);setError('');}}>查看最新登记</Button>}</div>}{error&&<p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy||finished||deliveryChanged||currentDelivery?.status!=='claimed'||!currentDelivery?.canManage} onClick={async()=>{if(await act({action:'deliver',orderId:delivery?.id,expectedRevision:delivery?.revision,confirmFinish:lastDelivery}))setDelivery(null);}}>{busy?'正在保存…':lastDelivery?'确认带回并结束饭局':'确认已带回'}</Button></DialogContent></Dialog>
+    <Dialog open={stopConfirm&&!finished&&!stopped} onOpenChange={open=>!busy&&setStopConfirm(open)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>开始下单，停止加单？</DialogTitle><DialogDescription>停止后不再接收新登记，本轮不能重新开放加单。已有 {room.orders.length} 条登记，其中 {counts.pending} 条待认领，仍可继续修改、认领和带回。饭局不会立即结束，原来的 12 小时截止时间保持不变。</DialogDescription></DialogHeader>{!room.canStopOrders&&<p className="error" role="alert">你的认领状态已变化，当前不能停止加单。</p>}{error&&<p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy||finished||stopped||!room.canStopOrders} onClick={async()=>{if(await act({action:'stopOrders'}))setStopConfirm(false);}}>{busy?'正在停止…':'确认停止加单'}</Button></DialogContent></Dialog>
     <Dialog open={copyText!==null} onOpenChange={open=>!open&&setCopyText(null)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>复制我的带饭清单</DialogTitle><DialogDescription>浏览器未能自动复制，请长按或全选下方内容复制。</DialogDescription></DialogHeader><Textarea ref={copyRef} readOnly value={copyText||''} rows={12} aria-label="我的带饭清单"/><Button variant="outline" className="secondary full" onClick={()=>{copyRef.current?.focus();copyRef.current?.select();}}>全选清单</Button></DialogContent></Dialog>
-    {!finished&&<div className="mobile-action-bar" data-hidden={!!editor||!!claim||!!cancel||!!delivery||stopConfirm||copyText!==null}><span>{carrying.length?`我来带 ${carrying.length} 条`:`${counts.pending} 条待认领`}</span>{stopped?<Button className="primary" disabled={busy} onClick={()=>{setFilter(carrying.length?'carrying':'all');document.getElementById('food-orders')?.scrollIntoView({behavior:'smooth'});}}>查看带饭清单</Button>:<Button className="primary" disabled={busy} onClick={()=>openEditor('new')}><Plus/>帮我带一份</Button>}</div>}
+    {!finished&&<div className="mobile-action-bar" data-hidden={!!editor||!!claim||!!cancel||!!delivery||(stopConfirm&&!stopped)||copyText!==null}><span>{carrying.length?`我来带 ${carrying.length} 条`:`${counts.pending} 条待认领`}</span>{stopped?<Button className="primary" disabled={busy} onClick={()=>{setFilter(carrying.length?'carrying':'all');document.getElementById('food-orders')?.scrollIntoView({behavior:'smooth'});}}>查看带饭清单</Button>:<Button className="primary" disabled={busy} onClick={()=>openEditor('new')}><Plus/>帮我带一份</Button>}</div>}
   </section>;
 }

@@ -64,6 +64,20 @@
       "when": 1789198859727,
       "tag": "0008_familiar_energizer",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1789199847875,
+      "tag": "0009_next_chronomancer",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1789200486644,
+      "tag": "0010_brainy_secret_warriors",
+      "breakpoints": true
     }
   ]
 }

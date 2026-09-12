@@ -45,3 +45,8 @@ next-env.d.ts
 /outputs/
 /work/
 *.tsbuildinfo
+
+# Wrangler secrets and task-local test state
+.dev.vars*
+/worker.local.json
+/audit-output/

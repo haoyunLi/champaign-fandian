@@ -42,7 +42,11 @@ export default function HistoryView() {
     finally { if (epoch.current === version) setLoading(false); }
   }, [trash,view]);
 
-  useEffect(() => { void load(); return () => { epoch.current++; }; }, [load]);
+  useEffect(() => {
+    const invalidate=()=>{epoch.current++;};
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Starting the external request also resets its loading indicator.
+    void load(); return invalidate;
+  }, [load]);
 
   function switchTab(value: typeof view) {
     if (busy || value === view) return;

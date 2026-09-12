@@ -9,11 +9,20 @@ export function ReplayButton({roomId}:{roomId:string}) {
   async function replay() {
     if(running.current)return;
     running.current=true;setBusy(true);setError('');
-    if(!requestId.current)requestId.current=crypto.randomUUID();
+    const pendingKey=`fd_pending_replay_${roomId}`;
+    if(!requestId.current){
+      try{const saved=sessionStorage.getItem(pendingKey);if(saved&&/^[a-f0-9-]{36}$/.test(saved))requestId.current=saved;}catch{}
+      if(!requestId.current)requestId.current=crypto.randomUUID();
+      try{sessionStorage.setItem(pendingKey,requestId.current);}catch{}
+    }
     try {
       const response=await fetch('/api/game',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'replay',room:roomId,requestId:requestId.current})});
       const value=await response.json() as Room & {error?:string};
-      if(!response.ok)throw new Error(value.error||'暂时无法创建，请重试。');
+      if(!response.ok){
+        if(response.status<500){requestId.current='';try{sessionStorage.removeItem(pendingKey);}catch{}}
+        throw new Error(value.error||'暂时无法创建，请重试。');
+      }
+      try{sessionStorage.removeItem(pendingKey);}catch{}
       window.location.assign(`/?room=${encodeURIComponent(value.id)}`);
     } catch(e){setError((e as Error).message);running.current=false;setBusy(false);}
   }

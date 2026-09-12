@@ -1,0 +1,116 @@
+# 饭点发布前审计报告
+
+日期：2026-09-12（America/Chicago）
+
+## 审查结论
+
+已完成前端交互、后端权限与并发、数据库迁移、依赖、凭据泄露和 GitHub 发布配置审查。确认的业务缺陷已修复，并加入 20 项可重复运行的回归测试。未发现已证实的 SQL 注入、用户输入触发的 XSS、跨身份历史泄露或未授权发起人操作。
+
+依赖扫描从 **19 项（9 high / 9 moderate / 1 low）** 降至 **4 moderate、0 high、0 critical**。剩余 4 项来自同一个仅用于开发工具的 esbuild 依赖链，详见 DEP-02。此审查不是“绝对安全”保证，不包含托管平台内部配置、负载压测或微信内置浏览器真机测试。
+
+## 范围与方法
+
+- React 19 / TypeScript 前端：首页、房间、历史、登记、认领、取消、带回与重开。
+- Vinext Worker：`app/api/game/route.ts` 全部 GET/POST 分支、会话、参数、响应投影与数据库原子条件。
+- SQLite/D1：完整迁移、唯一键、外键、候选快照、生命周期和请求重试。
+- 发布：依赖锁文件、脚本、忽略规则、Git 历史、静态入口、GitHub Actions 最小权限和版本固定。
+- 三个独立只读复审覆盖后端、前端和依赖/发布；确认缺陷通过真实 API 代码与隔离 SQLite 重现。另使用本机真实 Worker/D1 及浏览器核对实际页面。
+
+## 已修复的问题
+
+### DEP-01 · High（依赖告警，利用条件受限）· 已修复
+
+**位置：** `package.json:34`、`:46`、`:57` 及 `package-lock.json`。
+
+旧版本锁定了 React Server DOM、Vite、Vinext 及 Cloudflare 工具链的已知告警。部分问题仅影响开发服务器或构建时解析，不能将全部依赖告警等同于在线可利用漏洞；当前应用没有 Server Actions 或用户图片上传入口。
+
+升级至 React/React DOM/Server DOM 19.2.8、Vite 8.0.16、Vinext beta.6、RSC 插件 0.5.34、Cloudflare 插件 1.51.1、Wrangler 4.120.0，并刷新兼容的间接依赖。重新执行锁定安装、类型检查、代码检查、测试和生产构建。
+
+参考：[React Server Functions advisory](https://github.com/advisories/GHSA-wx67-qw84-cm4g)、[Vite advisory](https://github.com/advisories/GHSA-fx2h-pf6j-xcff)。
+
+### API-01 · Medium · 请求上限在完整读取后才生效 · 已修复
+
+**原证据：** 原 `route.ts` 的 `await request.text()` 完成后才检查长度。1 MiB 测试请求完整读取后才返回 413，不能限制缓冲内存。
+
+**现位置：** `lib/request-body.ts:4`、`app/api/game/route.ts:166`。
+
+现在按字节边读边限 16 KiB；超出即取消流，Content-Length 只作提前拒绝。测试覆盖无长度、虚假长度、提前拒绝和跨分块中文字符。同时只接受 JSON 请求，并拒绝跨站 Origin / Fetch Metadata 写入。
+
+### DATA-01 · Medium · 不同内容的登记重试被误报为成功 · 已修复
+
+**原证据：** 同一编号提交菜 A ×1，成功响应丢失后改为菜 B ×2 再提交，会返回 200，但仍保存 A ×1。
+
+**现位置：** `app/api/game/route.ts:15`、`components/food-orders.tsx:24`、`drizzle/0009_next_chronomancer.sql:1`。
+
+保存不可变的首次请求指纹，冲突返回 409；指纹不随之后编辑改变，原请求在编辑、停止加单、完成后仍能安全重试。客户端冻结并暂存未确认的完整提交快照，刷新后可继续找回；已确认保存后使用编辑功能修改。
+
+### DATA-02 · Medium · 过期取消窗口可以删除新内容 · 已修复
+
+**原证据：** 打开菜 A 的取消窗口；另一标签页编辑为 B、版本递增；旧窗口仍能删除 B。
+
+**现位置：** `app/api/game/route.ts:350`、`:372`；`components/food-orders.tsx:57`、`:130`。
+
+取消与其他登记操作一样检查版本，并在 DELETE 中原子校验。页面发现内容变化会禁用旧确认，要求先查看最新登记。测试覆盖缺失/过期版本、身份权限及编辑和取消并发。
+
+### DATA-03 · Medium · 已取消登记被迟到重试重新创建 · 已修复
+
+**原证据：** 删除登记会一起删除其请求编号。另一页面保留的旧提交随后重试，可能重新插入同一登记。
+
+**现位置：** `app/api/game/route.ts:368`、`:387`；`drizzle/0010_brainy_secret_warriors.sql:1`。
+
+取消时在同一事务内保留最小请求记录（编号、饭局、身份摘要、取消时间），不保存已删菜品或备注。新增检查该记录，旧重试返回 ORDER_CANCELLED。新编号仍可登记；过期取消不会留下错误记录。
+
+### UI-01 · Medium · 重开刷新后失去请求编号 · 已修复
+
+**位置：** `components/replay-button.tsx:12`。
+
+未确认的重开编号存入当前标签页会话存储，页面重新挂载也复用。成功后清除；明确的 4xx 也清除，使已删除新局不再永久锁住后续操作；网络/5xx 保留以防重复创建。
+
+### UI-02 · Low · 连接恢复提示及手机按钮状态 · 已修复
+
+**位置：** `app/page.tsx:122`、`components/food-orders.tsx` 末尾手机操作栏。
+
+首页将加载错误与创建错误分开，联网恢复后清除正确的提示。停止加单弹窗被远端状态关闭时，手机主操作栏按实际可见弹窗计算，不会继续隐藏。
+
+### REL-01 · Medium（发布可靠性）· 无可重复检查或 Pages 发布入口 · 已修复
+
+**位置：** `tests/`、`.github/workflows/validate-and-pages.yml:1`、`scripts/migrate-local.mjs:1`、`pages/index.html:1`。
+
+以前的验证只记录在 README，没有提交测试或 CI。现在自动检查覆盖真实 API 和 SQL，CI 从锁定文件安装、执行检查、生产构建并两次验证迁移。静态入口独立于 Worker 资源目录，指向现有应用，从而保留同源 Cookie 和生产数据。
+
+### SEC-01 · Low · 发布忽略规则与响应头 · 已修复/加固
+
+`.gitignore` 新增 `.dev.vars*`；扫描未发现实际提交的凭据，无需声称发生过密钥泄露。`worker/index.ts:5` 增加 nosniff、no-referrer 及禁止对象嵌入/限制 base 的 CSP。Pages 使用独立 CSP，不执行 JavaScript，也不访问饭局 API。
+
+## 剩余问题和明确边界
+
+### DEP-02 · Medium（仅开发依赖链）· 保留
+
+`drizzle-kit → @esbuild-kit/esm-loader → @esbuild-kit/core-utils → esbuild` 仍触发 4 个级联告警，根因是旧版 esbuild 开发服务器的跨站读取问题。[官方 advisory](https://github.com/advisories/GHSA-67mh-4wv8-2f99)
+
+迁移生成不启动该开发服务器，在线 Worker 不包含此工具。自动“强制修复”建议将 Drizzle 降至不兼容的 0.18.1，未执行。不要把这条开发服务器暴露到网络；后续待上游兼容更新。CI 继续展示这些告警，并阻止 high/critical。
+
+### OPS-01 · Medium（运维风险）· 未验证平台级限流
+
+公开的创建、重开和餐馆维护接口没有应用级频率限制；餐馆总数、每局投票/登记数量已有限额，但不能代替抗滥用限流。未读取到托管平台限流配置，不能声称平台没有保护。适用于目前持链接群内协作；扩大公开推广前应在托管边缘配置限流和用量告警。
+
+### SEC-02 · Low（纵深防护）· 严格脚本 CSP / 限制框架嵌入未启用
+
+当前使用 React 默认转义，未找到用户输入触发的危险 HTML 插入。SSR 内联内容与 Sites 预览存在兼容约束，未贸然增加会阻断页面的脚本 CSP 或 frame-ancestors 限制。新增响应头是基础加固，不代表完整 CSP 已部署。
+
+### 产品规则，不是漏洞
+
+- 持房间链接的人可查看昵称、票数和备注；所有人可结束已有票的投票。
+- 餐馆库由大家共同添加、编辑、删除；发起人可删除/恢复自己的饭局，参与者仅移除自己的历史。
+- 身份由浏览器 Cookie 识别；跨设备无法自动找回，也不能防止一个人使用多个浏览器投票。
+- 历史“删除”主要是可恢复的软删除，不是立即永久清除所有数据库记录。取消登记保留最小编号记录用于阻止重复提交。
+- 测试只在隔离数据库中操作。未对生产数据做破坏性测试，GitHub 不包含用户实际记录、数据库或凭据。
+
+## 验证记录
+
+- 20 项自动测试通过：`npm test`，使用真实 API 代码与完整迁移的隔离 SQLite，D1 适配层事务执行 SQL。
+- 锁定依赖重新安装、TypeScript、ESLint 零警告及生产 Worker 构建通过。
+- 真实本地 D1 初始迁移、增量迁移和重复运行检查通过；过往迁移不改写。
+- 浏览器核对手机入口、真实创建、随机投票、确认餐馆、登记和过期取消窗口；核心弱网/并发规则由回归测试与前端复审共同覆盖。
+- 已有源代码历史和本次新增文件经过凭据/数据文件检查；保留第三方许可证。
+- GitHub Actions 的实际执行记录可在仓库 Actions 查看；该流程成功后才发布 Pages。

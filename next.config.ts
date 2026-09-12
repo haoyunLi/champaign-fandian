@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Security response headers are applied by worker/index.ts on the deployed path.
 };
 
 export default nextConfig;

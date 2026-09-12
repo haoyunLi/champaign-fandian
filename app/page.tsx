@@ -118,13 +118,16 @@ export default function Home() {
   const [deleting, setDeleting] = useState<Restaurant | null>(null), [lastDeleted, setLastDeleted] = useState<Restaurant | null>(null), [deleteError, setDeleteError] = useState('');
   const [mode, setMode] = useState<VotingMode>('random');
   const [pendingCreation,setPendingCreation] = useState(false);
+  const [pendingCreationCount,setPendingCreationCount] = useState(0);
+  const [loadError,setLoadError] = useState('');
   const createRunning = useRef(false);
   const createAttempt = useRef<{requestId:string;title:string;mode:VotingMode;restaurantIds:string[]}|null>(null);
   useEffect(()=>{
     try {
       const saved=JSON.parse(sessionStorage.getItem('fd_pending_create')||'null');
       if(saved && typeof saved.requestId==='string' && /^[a-f0-9-]{36}$/.test(saved.requestId) && typeof saved.title==='string' && ['random','manual'].includes(saved.mode) && Array.isArray(saved.restaurantIds) && saved.restaurantIds.every((id:unknown)=>typeof id==='string')) {
-        createAttempt.current=saved;setTitle(saved.title);setMode(saved.mode);setPendingCreation(true);
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- Hydrate a pending submission from browser storage after SSR.
+        createAttempt.current=saved;setPendingCreationCount(saved.restaurantIds.length);setTitle(saved.title);setMode(saved.mode);setPendingCreation(true);
       }
     } catch {}
   },[]);
@@ -145,13 +148,13 @@ export default function Home() {
     const sequence = ++loadSequence.current;
     pageLoading.current = true;
     const epoch = ++catalogEpoch.current;
-    currentRoom.current = id; setRoomId(id); setRoom(null); setLoading(true); setError('');
+    currentRoom.current = id; setRoomId(id); setRoom(null); setLoading(true); setLoadError(''); setError('');
     try { if (id) { const r = await api<Room>(undefined, id); if (currentRoom.current === id && sequence === loadSequence.current) { unavailableRoom.current = ''; acceptRoom(r); } } else { const c = await api<Catalog>(); if (!currentRoom.current && sequence === loadSequence.current && epoch === catalogEpoch.current) { acceptCatalog(c); setCatalogSyncError(false); setRoom(null); } } }
-    catch (e) { if (currentRoom.current === id && sequence === loadSequence.current && epoch === catalogEpoch.current) { if (id && e instanceof ApiError && e.status === 404) { unavailableRoom.current = id; setRoom(null); } setError((e as Error).message); } }
+    catch (e) { if (currentRoom.current === id && sequence === loadSequence.current && epoch === catalogEpoch.current) { if (id && e instanceof ApiError && e.status === 404) { unavailableRoom.current = id; setRoom(null); } setLoadError((e as Error).message); } }
     finally { if (sequence === loadSequence.current) { pageLoading.current = false; setLoading(false); } }
   }, [acceptRoom, acceptCatalog]);
   useEffect(() => { const update = () => load(new URLSearchParams(window.location.search).get('room') || ''); update(); window.addEventListener('popstate', update); return () => window.removeEventListener('popstate', update); }, [load]);
-  useEffect(() => { if (!roomId) return; let cancelled = false; let running = false; const timer = window.setInterval(async () => { if (running || document.hidden) return; running = true; try { const r = await api<Room>(undefined, roomId); if (!cancelled) { unavailableRoom.current = ''; acceptRoom(r); setError(''); } } catch (e) { if (!cancelled) { if (e instanceof ApiError && e.status === 404) { unavailableRoom.current = roomId; setRoom(null); setError(e.message); } else setError('连接暂时中断，正在自动重连。'); } } finally { running = false; } }, 4000); return () => { cancelled = true; clearInterval(timer); }; }, [roomId, acceptRoom]);
+  useEffect(() => { if (!roomId) return; let cancelled = false; let running = false; const timer = window.setInterval(async () => { if (running || document.hidden) return; running = true; try { const r = await api<Room>(undefined, roomId); if (!cancelled) { unavailableRoom.current = ''; acceptRoom(r); setError(''); setLoadError(''); } } catch (e) { if (!cancelled) { if (e instanceof ApiError && e.status === 404) { unavailableRoom.current = roomId; setRoom(null); setError(e.message); } else setError('连接暂时中断，正在自动重连。'); } } finally { running = false; } }, 4000); return () => { cancelled = true; clearInterval(timer); }; }, [roomId, acceptRoom]);
   useEffect(() => {
     if (roomId) return;
     let cancelled = false, running = false;
@@ -161,7 +164,7 @@ export default function Home() {
       const epoch = ++catalogEpoch.current;
       try {
         const c = await api<Catalog>();
-        if (!cancelled && !currentRoom.current && epoch === catalogEpoch.current) { acceptCatalog(c); setCatalogSyncError(false); }
+        if (!cancelled && !currentRoom.current && epoch === catalogEpoch.current) { acceptCatalog(c); setCatalogSyncError(false); setLoadError(''); }
       } catch { if (!cancelled && !currentRoom.current && epoch === catalogEpoch.current) setCatalogSyncError(true); }
       finally { running = false; }
     };
@@ -179,6 +182,7 @@ export default function Home() {
     if(createRunning.current) return;
     createRunning.current=true;setBusy(true);setError('');
     if(!createAttempt.current) createAttempt.current={requestId:crypto.randomUUID(),title,mode,restaurantIds:catalog?.restaurants.filter(r=>r.selected).map(r=>r.id)||[]};
+    setPendingCreationCount(createAttempt.current.restaurantIds.length);
     try { sessionStorage.setItem('fd_pending_create',JSON.stringify(createAttempt.current)); } catch {}
     try {
       const r=await api<Room>({action:'create',...createAttempt.current});
@@ -190,7 +194,7 @@ export default function Home() {
   }
   const selected = catalog?.restaurants.filter(r => r.selected).length || 0;
   return <div className="app-shell"><header className="site-header"><a href="/" className="brand" onClick={e => { e.preventDefault(); navigate(); }}><Soup aria-hidden="true" /><span>饭点</span></a><span className="location">Champaign · Urbana</span><nav className="site-nav" aria-label="主导航"><a className="nav-link active" href={roomId ? '/' : '#restaurants'} onClick={e => { if (roomId) { e.preventDefault(); navigate(); } }}>餐馆清单</a><a className="nav-link" href="/history">历史记录</a></nav></header>
-    <main className={room && room.phase!=='finished' ? 'has-mobile-action' : ''}>{error && <div className="error page-error" role="alert">{error}<Button variant="ghost" onClick={() => load(roomId)}>重试</Button></div>}
+    <main className={room && room.phase!=='finished' ? 'has-mobile-action' : ''}>{(error||loadError) && <div className="error page-error" role="alert">{error||loadError}<Button variant="ghost" onClick={() => load(roomId)}>重试</Button></div>}
       {loading ? <div className="loading"><Loader2 className="spin" /><p>正在准备餐桌…</p></div> : roomId ? room && room.id === roomId && <RoomView key={room.id} room={room} setRoom={acceptRoom} home={() => navigate()} /> : catalog && <>
         {catalogSyncError && <p className="home-sync-error" role="status">带饭状态暂未更新，正在自动重连。恢复连接后会自动更新。</p>}
         {!!catalog.activeRooms.length && <section className="active-meals"><div className="section-heading"><div><h2>正在进行的饭局</h2><p>我发起和参与的 · {catalog.activeRoomCount} 局进行中</p><p className="home-sync-note">带饭状态每 8 秒自动更新</p></div><a className="history-open" href="/history">全部记录<ArrowRight size={16}/></a></div><div className="active-meal-list">{catalog.activeRooms.map(r => <HomeMealCard key={r.id} meal={r} open={navigate}/>)}</div>{catalog.activeRoomCount>catalog.activeRooms.length&&<a href="/history" className="history-open">还有 {catalog.activeRoomCount-catalog.activeRooms.length} 局，查看全部记录</a>}</section>}
@@ -207,6 +211,6 @@ export default function Home() {
     </main><footer><span>饭点 · 和饭搭子一起，少纠结一顿。</span><span>自主投票 · 随机抽签</span></footer>
     {editor && <RestaurantEditor item={editor} close={() => setEditor(null)} saved={catalogChanged} />}
     <AlertDialog open={!!deleting} onOpenChange={open => !open && !busy && setDeleting(null)}><AlertDialogContent className="editor-dialog"><AlertDialogHeader><AlertDialogTitle>删除这家餐馆？</AlertDialogTitle><AlertDialogDescription>「{deleting?.name}」会从大家共用的餐馆库中移除，之后的新投票不再可选。已开始的投票、结果和带饭记录不受影响。删除后可点击「撤销」恢复。</AlertDialogDescription></AlertDialogHeader>{deleteError && <p className="error" role="alert">{deleteError}</p>}<AlertDialogFooter><AlertDialogCancel className="secondary" disabled={busy}>取消</AlertDialogCancel><AlertDialogAction className="delete-confirm" variant="destructive" disabled={busy} onClick={async e => { e.preventDefault(); if(!deleting) return; setBusy(true); setDeleteError(''); try { catalogChanged(await api<Catalog>({ action:'deleteRestaurant', id:deleting.id })); setLastDeleted(deleting); setDeleting(null); } catch(e) { setDeleteError((e as Error).message); } finally { setBusy(false); } }}>{busy ? '正在删除…' : '确认删除'}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
-    <Dialog open={creating} onOpenChange={open => !busy && setCreating(open)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>今天这顿，你来组局</DialogTitle><DialogDescription>本轮包含已选的 {pendingCreation ? createAttempt.current?.restaurantIds.length : selected} 家餐馆。{mode === 'manual' ? '每人自主选择一家餐馆投票。' : '每人随机抽一家餐馆并自动投票。'}</DialogDescription></DialogHeader><form onSubmit={e => { e.preventDefault(); void createRoom(); }}><label className="field">这轮投票的名字<Input disabled={busy||pendingCreation} required maxLength={60} value={title} onChange={e => setTitle(e.target.value)} /></label><fieldset className="mode-field" disabled={busy||pendingCreation}><legend>选择本轮玩法</legend><div className="mode-options"><label className={`mode-option ${mode === 'manual' ? 'chosen' : ''}`}><input type="radio" name="voting-mode" value="manual" checked={mode === 'manual'} onChange={() => setMode('manual')} /><VoteIcon aria-hidden="true" /><span><strong>自主投票</strong><small>每人自己选一家想吃的餐馆</small></span></label><label className={`mode-option ${mode === 'random' ? 'chosen' : ''}`}><input type="radio" name="voting-mode" value="random" checked={mode === 'random'} onChange={() => setMode('random')} /><Dice5 aria-hidden="true" /><span><strong>随机抽签</strong><small>每人随机抽一家，自动计一票</small></span></label></div><p className="fine-print">两种玩法均为一人一票，最高票获胜；平票时随机选一家。创建后玩法固定。</p></fieldset>{error && <p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy}>{busy ? <Loader2 className="spin" /> : <Plus />}{busy ? '正在创建…' : pendingCreation ? '重试，找回上次创建的饭局' : '创建投票，叫上大家'}</Button><p className="fine-print">任何持有本轮链接的人都可以结束投票。请保留此浏览器，方便从历史记录管理你发起的饭局。</p></form></DialogContent></Dialog>
+    <Dialog open={creating} onOpenChange={open => !busy && setCreating(open)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>今天这顿，你来组局</DialogTitle><DialogDescription>本轮包含已选的 {pendingCreation ? pendingCreationCount : selected} 家餐馆。{mode === 'manual' ? '每人自主选择一家餐馆投票。' : '每人随机抽一家餐馆并自动投票。'}</DialogDescription></DialogHeader><form onSubmit={e => { e.preventDefault(); void createRoom(); }}><label className="field">这轮投票的名字<Input disabled={busy||pendingCreation} required maxLength={60} value={title} onChange={e => setTitle(e.target.value)} /></label><fieldset className="mode-field" disabled={busy||pendingCreation}><legend>选择本轮玩法</legend><div className="mode-options"><label className={`mode-option ${mode === 'manual' ? 'chosen' : ''}`}><input type="radio" name="voting-mode" value="manual" checked={mode === 'manual'} onChange={() => setMode('manual')} /><VoteIcon aria-hidden="true" /><span><strong>自主投票</strong><small>每人自己选一家想吃的餐馆</small></span></label><label className={`mode-option ${mode === 'random' ? 'chosen' : ''}`}><input type="radio" name="voting-mode" value="random" checked={mode === 'random'} onChange={() => setMode('random')} /><Dice5 aria-hidden="true" /><span><strong>随机抽签</strong><small>每人随机抽一家，自动计一票</small></span></label></div><p className="fine-print">两种玩法均为一人一票，最高票获胜；平票时随机选一家。创建后玩法固定。</p></fieldset>{error && <p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy}>{busy ? <Loader2 className="spin" /> : <Plus />}{busy ? '正在创建…' : pendingCreation ? '重试，找回上次创建的饭局' : '创建投票，叫上大家'}</Button><p className="fine-print">任何持有本轮链接的人都可以结束投票。请保留此浏览器，方便从历史记录管理你发起的饭局。</p></form></DialogContent></Dialog>
   </div>;
 }
