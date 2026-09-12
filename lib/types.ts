@@ -5,6 +5,6 @@ export type VotingMode = 'random' | 'manual';
 export type MealLifecycle = { phase: 'voting' | 'delivery' | 'finished'; decided_at: string | null; delivery_deadline_at: string | null; completed_at: string | null; completion_reason: 'delivered' | 'timeout' | null };
 export type Room = MealLifecycle & { id: string; title: string; status: string; mode: VotingMode; winner_id: string | null; created_at: string; revision: number; isHost: boolean; inHistory: boolean; preferred_nickname: string; candidates: Restaurant[]; votes: Vote[]; myVote: Vote | null; total: number; orders: FoodOrder[] };
 export type HomeMeal = HistoryRoom & { pending_count: number; claimed_count: number; delivered_count: number };
-export type Catalog = { restaurants: Restaurant[]; rooms: (MealLifecycle & { id: string; title: string; status: string; mode: VotingMode })[]; activeRooms: HomeMeal[]; activeRoomCount: number; recentFinishedRooms: HomeMeal[] };
+export type Catalog = { restaurants: Restaurant[]; rooms: (MealLifecycle & { id: string; title: string; status: string; mode: VotingMode; created_at: string })[]; activeRooms: HomeMeal[]; activeRoomCount: number; recentFinishedRooms: HomeMeal[] };
 export type HistoryRoom = MealLifecycle & { id: string; title: string; status: string; mode: VotingMode; isHost: boolean; created_at: string; deleted_at: string | null; winner_name: string | null; vote_count: number; order_count: number };
 export type HistoryPage = { rooms: HistoryRoom[]; nextCursor: string | null };

@@ -1,22 +1,19 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, History, Loader2, RotateCcw, Soup, Trash2, Undo2 } from 'lucide-react';
+import { ArrowLeft, ArrowRight, CalendarDays, History, Loader2, RotateCcw, Soup, Trash2, Undo2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import type { HistoryPage, HistoryRoom } from '@/lib/types';
 import { ReplayButton } from '@/components/replay-button';
 import { MealStatus } from '@/components/meal-status';
+import { formatMealDateTime } from '@/lib/meal-date';
 
 async function request<T>(url: string, payload?: Record<string, unknown>): Promise<T> {
   const response = await fetch(url, payload ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : { cache: 'no-store' });
   const value = await response.json() as T & { error?: string };
   if (!response.ok) throw new Error(value.error || '暂时无法完成，请重试。');
   return value;
-}
-
-function dateLabel(value: string) {
-  return new Date(value).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
 export default function HistoryView() {
@@ -85,6 +82,7 @@ export default function HistoryView() {
         <Button variant="ghost" className="history-refresh" disabled={busy || loading} onClick={() => void load()}><RotateCcw size={16} />刷新</Button>
       </div>
       <p className="history-tab-note">{trash ? '自己删除的投票、从个人列表移除的记录，都可在这里恢复。' : view==='hosted' ? '你发起的投票，包括正在进行和已经结束的记录。' : '投票、登记或认领带饭后自动收录；也可在群链接页面点「保存到历史」。按发起时间从新到旧排列。'}</p>
+      <p className="history-timezone">日期和时间均为香槟当地时间。</p>
       {lastDeleted && <div className="delete-notice" role="status"><span>「{lastDeleted.title}」已移入回收站。</span><Button variant="ghost" disabled={busy || loading} onClick={() => void restore(lastDeleted)}><Undo2 />撤销</Button></div>}
       {notice && <p className="history-notice" role="status">{notice}</p>}
       {error && <div className="error" role="alert">{error}<Button variant="ghost" disabled={busy || loading} onClick={() => void load()}>重新加载</Button></div>}
@@ -92,7 +90,8 @@ export default function HistoryView() {
         {rows.map(item => <article className="history-row" key={item.id}>
           <div className="history-info">
             <div className="history-title"><h2>{item.title}</h2><MealStatus meal={item} /></div>
-            <p className="history-date"><time dateTime={item.created_at}>{dateLabel(item.created_at)}</time> 发起{item.deleted_at && <> · <time dateTime={item.deleted_at}>{dateLabel(item.deleted_at)}</time> {item.isHost ? '删除' : '移除'}</>}</p>
+            <p className="history-date"><CalendarDays size={17} aria-hidden="true"/><span>发起日期 <time dateTime={item.created_at}>{formatMealDateTime(item.created_at)}</time></span></p>
+            {item.deleted_at && <p className="history-removed-date">{item.isHost ? '删除于' : '移除于'} <time dateTime={item.deleted_at}>{formatMealDateTime(item.deleted_at)}</time></p>}
             <p className="history-result">{item.winner_name ? <>选定餐馆 <strong>{item.winner_name}</strong></> : '餐馆尚未确定'}</p>
             <p className="history-counts"><b className="history-role">{item.isHost ? '我发起的' : '参与或保存'}</b><span>·</span>{item.mode === 'manual' ? '自主投票' : '随机抽签'}<span>·</span>{item.vote_count} 人投票<span>·</span>{item.order_count} 条带饭登记</p>
           </div>

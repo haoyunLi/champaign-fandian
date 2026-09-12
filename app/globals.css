@@ -47,6 +47,15 @@
 .active-meals .section-heading .home-sync-note{font-size:12px;margin-top:5px;color:#748195}
 .home-sync-error{font-size:13px;padding:12px 14px;margin:20px 0 0;border-radius:10px;background:#fff4e5;color:#956124}
 .recent-finished-meals h2{font-size:21px}
+.history-date{display:flex;align-items:flex-start;gap:8px;font-size:14px;color:#8f482d;line-height:1.9;margin:12px 0}
+.history-date>svg{flex-shrink:0;margin-top:5px}
+.history-date time{font-weight:650;font-variant-numeric:tabular-nums}
+.history-removed-date,.history-timezone{font-size:12px;color:#738093;line-height:1.8;margin:8px 0}
+.history-removed-date{margin-top:-6px}
+.home-meal-date{font-size:12px;color:#64738a;line-height:1.8}
+.recent-meal-main{display:flex;flex-direction:column;gap:7px}
+.recent-meal-main strong{font-weight:550}
+.recent-meal-main time{font-size:13px;line-height:1.8;color:#64738a;font-variant-numeric:tabular-nums}
 @media(max-width:380px){.home-order-counts{gap:5px}.home-order-counts>span{font-size:12px;padding:5px 6px}}
 .chosen-restaurant{padding:23px 26px;background:#fff6ed;border:1px solid #f2ddcb;border-radius:18px;margin-bottom:24px}
 .chosen-heading{display:flex;align-items:center;gap:9px;color:#aa5a28;font-size:14px;margin-bottom:10px}

@@ -9,6 +9,7 @@ import type { Catalog, HomeMeal, Restaurant, Room, VotingMode } from '@/lib/type
 import { FoodOrders } from '@/components/food-orders';
 import { ReplayButton } from '@/components/replay-button';
 import { MealStatus, useMealPhase } from '@/components/meal-status';
+import { formatMealDateTime } from '@/lib/meal-date';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 
 class ApiError extends Error { constructor(message: string, public status: number) { super(message); } }
@@ -26,6 +27,7 @@ function HomeMealCard({ meal, open }: { meal: HomeMeal; open: (id: string) => vo
     <span className="active-meal-main">
       <span className="active-meal-title"><strong>{meal.title}</strong><MealStatus meal={meal}/></span>
       <span className="active-meal-detail">{meal.isHost ? '我发起的' : '我参与或保存的'} · {meal.winner_name || `${meal.vote_count} 人已投`}</span>
+      <span className="home-meal-date">发起于 <time dateTime={meal.created_at}>{formatMealDateTime(meal.created_at)}</time> · 香槟时间</span>
       {meal.phase !== 'voting' && <>
         {meal.order_count ? <span className="home-order-counts">
           <span className={meal.pending_count ? 'has-pending' : ''}>待认领 <b>{meal.pending_count}</b> 条</span>
@@ -171,7 +173,7 @@ export default function Home() {
           <div className="restaurant-list">{catalog.restaurants.map((r, i) => <div className={`restaurant-row ${!r.selected ? 'excluded' : ''}`} key={r.id}><Checkbox aria-label={`选择 ${r.name}`} checked={!!r.selected} disabled={busy} onCheckedChange={checked => setCatalog(previous => previous && ({ ...previous, restaurants: previous.restaurants.map(item => item.id === r.id ? { ...item, selected: checked ? 1 : 0 } : item) }))} /><span className="row-number">{String(i + 1).padStart(2, '0')}</span><div className="restaurant-info"><strong>{r.name}</strong><span>{r.cuisine || '自定义餐馆'}</span></div><div className="restaurant-address">{r.address || '可以补充你们熟悉的店名和地址'}</div>{r.source && <a href={r.source} target="_blank" rel="noreferrer" aria-label={`${r.name} 官网`} className="icon-button source-icon"><ExternalLink size={17} /></a>}<Button variant="ghost" size="icon" className="icon-button" aria-label={`修改 ${r.name}`} onClick={() => setEditor(r)}><Pencil size={17} /></Button><Button variant="ghost" className="restaurant-delete" aria-label={`删除 ${r.name}`} disabled={busy} onClick={() => { setDeleteError(''); setDeleting(r); }}><Trash2 size={16} /><span>删除</span></Button></div>)}</div>
           <p className="catalog-note">人人都能添加、改名和删除；勾选只影响你创建的下一轮。已开始的投票名单保持不变。</p>
         </section>
-        {!!catalog.rooms.length && <section className="recent"><div className="recent-heading"><h2>我发起的投票</h2><a href="/history">查看全部历史<ArrowRight size={16} /></a></div>{catalog.rooms.map(r => <button key={r.id} onClick={() => navigate(r.id)}><span>{r.title}</span><span><MealStatus meal={r} /><ArrowRight size={17} /></span></button>)}</section>}
+        {!!catalog.rooms.length && <section className="recent"><div className="recent-heading"><h2>我发起的投票</h2><a href="/history">查看全部历史<ArrowRight size={16} /></a></div><p className="history-timezone">按发起时间排列 · 香槟当地时间</p>{catalog.rooms.map(r => <button key={r.id} onClick={() => navigate(r.id)}><span className="recent-meal-main"><strong>{r.title}</strong><time dateTime={r.created_at}>{formatMealDateTime(r.created_at)}</time></span><span><MealStatus meal={r} /><ArrowRight size={17} /></span></button>)}</section>}
       </>}
     </main><footer><span>饭点 · 和饭搭子一起，少纠结一顿。</span><span>自主投票 · 随机抽签</span></footer>
     {editor && <RestaurantEditor item={editor} close={() => setEditor(null)} saved={catalogChanged} />}
