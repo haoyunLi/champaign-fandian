@@ -207,7 +207,7 @@ const rename = async (who,nickname,expectedRevision) => {
 };
 test('profile persists, identifies the creator and participants, and changes only the current visitor', async () => {
   const host=visitor(),guest=visitor(),carrier=visitor();
-  assert.deepEqual((await call(host)).data.profile,{nickname:'',revision:0});
+  assert.equal((await call(host)).data.profile.nickname,'');assert.equal((await call(host)).data.profile.revision,0);
   const first=await rename(host,'  小李  ');assert.equal(first.status,200);assert.equal(first.data.nickname,'小李');
   const {room}=await create(host);
   assert.equal(room.creator_name,'小李');assert.equal(room.members[0].isHost,true);

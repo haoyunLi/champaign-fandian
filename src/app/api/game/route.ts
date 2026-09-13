@@ -1,8 +1,10 @@
+import { chatGPTSignInPath, chatGPTSignOutPath } from '@/app/chatgpt-auth';
+import { visitorIdentity } from '@/lib/visitor-identity';
 import { database } from '@/lib/game-db';
 import { seeds } from '@/lib/seeds';
 import { PayloadTooLargeError, readRequestText } from '@/lib/request-body';
 import { ACTIVE_DELIVERY_SQL, finishMeal, mealLifecycle, settleMeals, type LifecycleRow } from '@/lib/meal-lifecycle';
-import type { Restaurant, Room, Vote, FoodOrder, HistoryRoom, HistoryPage, HomeMeal, VotingMode, Profile, Member } from '@/lib/types';
+import type { Restaurant, Room, Vote, FoodOrder, HistoryRoom, HistoryPage, HomeMeal, VotingMode, Profile, Member, AccountSession } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 class UserError extends Error { constructor(message: string, public status = 400, public code?: string, public room?: Room) { super(message); } }
@@ -43,12 +45,6 @@ function randomIndex(n: number) {
   let r: number;
   do { r = crypto.getRandomValues(new Uint32Array(1))[0]; } while (r >= limit);
   return r % n;
-}
-async function identity(request: Request) {
-  const cookie = request.headers.get('cookie')?.match(/(?:^|;\s*)fd_session=([a-f0-9]{64})(?:;|$)/)?.[1];
-  const token = cookie || Array.from(crypto.getRandomValues(new Uint8Array(32)), x => x.toString(16).padStart(2,'0')).join('');
-  const owner = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))), x => x.toString(16).padStart(2,'0')).join('');
-  return { owner, cookie: cookie ? null : `fd_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=31536000${new URL(request.url).protocol === 'https:' ? '; Secure' : ''}` };
 }
 async function profile(db: D1Database, owner: string): Promise<Profile> {
   return await db.prepare('SELECT nickname,revision FROM visitor_preferences WHERE owner=?').bind(owner).first<Profile>() || {nickname:'',revision:0};
@@ -185,16 +181,26 @@ async function roomState(db: D1Database, id: string, owner: string): Promise<Roo
 }
 async function handle(request: Request) {
   let cookie: string | null = null;
+  let viewKey='';
+  let account:AccountSession|undefined;
+  let authAvailable=false;
   try {
-    const identityResult = await identity(request); cookie=identityResult.cookie;
-    const owner=identityResult.owner, db=database(), url=new URL(request.url);
+    const url=new URL(request.url);
+    if(request.method!=='GET') {
+      const origin=request.headers.get('origin');
+      if((origin&&origin!==url.origin)||request.headers.get('sec-fetch-site')==='cross-site')throw new UserError('请在投票页面内操作。',403);
+    }
+    const db=database();
+    const identityResult = await visitorIdentity(request,db); cookie=identityResult.cookie;viewKey=identityResult.viewKey;account=identityResult.account;authAvailable=identityResult.authAvailable;
+    const owner=identityResult.owner;
     let result: unknown;
     if (request.method === 'GET') {
       const room=url.searchParams.get('room');
       result=url.searchParams.has('profile') ? await profile(db,owner) : room ? await roomState(db,clean(room,64,'投票编号'),owner) : url.searchParams.has('history') ? await historyPage(db,owner,url) : await catalog(db,owner);
     } else {
-      const origin=request.headers.get('origin');
-      if ((origin && origin!==url.origin) || request.headers.get('sec-fetch-site')==='cross-site') throw new UserError('请在投票页面内操作。',403);
+      const expectedIdentity=request.headers.get('x-fandian-identity');
+      if((expectedIdentity&&expectedIdentity!==viewKey)||(!expectedIdentity&&identityResult.account.signed_in))
+        throw new UserError('登录身份已变化，请刷新页面后再操作。',409,'AUTH_CHANGED');
       if(request.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='application/json') throw new UserError('请使用投票页面提交内容。',415);
       const raw=await readRequestText(request);
       let body: Record<string,unknown>;
@@ -441,13 +447,22 @@ async function handle(request: Request) {
         }
       } else throw new UserError('未知操作。');
     }
-    const headers: Record<string,string>={'Cache-Control':'no-store'};
+    if(result&&typeof result==='object') {
+      const currentProfile='profile' in result?result.profile as Profile:'nickname' in result&&'revision' in result?result as Profile:null;
+      if(currentProfile){
+        const returnTo='candidates' in result&&'id' in result?`/?room=${encodeURIComponent(String(result.id))}`:url.searchParams.has('history')?'/history':'/';
+        currentProfile.account=identityResult.account;
+        currentProfile.sign_in_path=identityResult.authAvailable?chatGPTSignInPath(returnTo):undefined;currentProfile.sign_out_path=identityResult.authAvailable?chatGPTSignOutPath(returnTo):undefined;
+      }
+    }
+    const headers: Record<string,string>={'Cache-Control':'no-store','X-Fandian-Identity':viewKey};
     if(cookie) headers['Set-Cookie']=cookie;
     return Response.json(result,{headers});
   } catch(error) {
     if(error instanceof PayloadTooLargeError) error=new UserError('提交内容过长。',413);
+    if(error instanceof UserError&&error.room){error.room.profile.account=account;error.room.profile.sign_in_path=authAvailable?chatGPTSignInPath(`/?room=${encodeURIComponent(error.room.id)}`):undefined;error.room.profile.sign_out_path=authAvailable?chatGPTSignOutPath(`/?room=${encodeURIComponent(error.room.id)}`):undefined;}
     if(!(error instanceof UserError)) console.error('Fandian request failed',error);
-    const headers: Record<string,string>={'Cache-Control':'no-store'}; if(cookie) headers['Set-Cookie']=cookie;
+    const headers: Record<string,string>={'Cache-Control':'no-store'};if(viewKey)headers['X-Fandian-Identity']=viewKey; if(cookie) headers['Set-Cookie']=cookie;
     return Response.json({error:error instanceof UserError ? error.message : '暂时连接不上，请稍后重试。你的填写内容仍然保留。',...(error instanceof UserError && error.code ? {code:error.code,room:error.room} : {})},{status:error instanceof UserError ? error.status : 503,headers});
   }
 }

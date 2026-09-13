@@ -1,4 +1,5 @@
 'use client';
+import { gameFetch } from '@/lib/game-client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Copy, HandHeart, Loader2, LockKeyhole, Pencil, Plus, ShoppingBag, Undo2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -67,7 +68,7 @@ export function FoodOrders({ room, update }: { room: Room; update: (r: Room) => 
     if(busyRef.current || finished) return false;
     busyRef.current=true;setBusy(true);setError('');
     try {
-      const response=await fetch('/api/game',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room:room.id,...payload})});
+      const response=await gameFetch('/api/game',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room:room.id,...payload})});
       const value=await response.json() as Room & {error?:string;code?:string;room?:Room};
       if(!response.ok){
         if(payload.action==='order'&&response.status<500)clearOrderAttempt();

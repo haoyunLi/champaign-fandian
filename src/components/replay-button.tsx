@@ -1,4 +1,5 @@
 'use client';
+import { gameFetch } from '@/lib/game-client';
 import { useRef, useState } from 'react';
 import { Loader2, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -16,7 +17,7 @@ export function ReplayButton({roomId}:{roomId:string}) {
       try{sessionStorage.setItem(pendingKey,requestId.current);}catch{}
     }
     try {
-      const response=await fetch('/api/game',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'replay',room:roomId,requestId:requestId.current})});
+      const response=await gameFetch('/api/game',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'replay',room:roomId,requestId:requestId.current})});
       const value=await response.json() as Room & {error?:string};
       if(!response.ok){
         if(response.status<500){requestId.current='';try{sessionStorage.removeItem(pendingKey);}catch{}}

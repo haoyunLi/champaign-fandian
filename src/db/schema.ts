@@ -42,3 +42,8 @@ export const cancelledOrderRequests = sqliteTable('cancelled_order_requests', {
   id: text('id').primaryKey(), roomId: text('room_id').notNull().references(() => rooms.id),
   owner: text('owner').notNull(), cancelledAt: text('cancelled_at').notNull(),
 });
+
+// Only a trusted Sites sign-in can resolve an account to its existing visitor data.
+export const accountLinks = sqliteTable('account_links', {
+  accountId: text('account_id').primaryKey(), owner: text('owner').notNull(), createdAt: text('created_at').notNull(),
+}, t => [uniqueIndex('idx_account_links_owner').on(t.owner)]);

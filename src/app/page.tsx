@@ -1,4 +1,5 @@
 'use client';
+import { gameFetch } from '@/lib/game-client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, Copy, Dice5, Loader2, Pencil, Plus, Soup, Users, Trophy, ExternalLink, Trash2, Undo2, BookmarkPlus, Vote as VoteIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -15,7 +16,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 
 class ApiError extends Error { constructor(message: string, public status: number) { super(message); } }
 async function api<T>(payload?: Record<string, unknown>, room?: string): Promise<T> {
-  const response = await fetch(`/api/game${room ? `?room=${encodeURIComponent(room)}` : ''}`, payload ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : { cache: 'no-store' });
+  const response = await gameFetch(`/api/game${room ? `?room=${encodeURIComponent(room)}` : ''}`, payload ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : { cache: 'no-store' });
   const value = await response.json() as T & { error?: string };
   if (!response.ok) throw new ApiError(value.error || '暂时无法完成，请重试。', response.status);
   return value;

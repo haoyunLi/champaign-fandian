@@ -1,4 +1,5 @@
 'use client';
+import { gameFetch } from '@/lib/game-client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, CalendarDays, History, Loader2, RotateCcw, Soup, Trash2, Undo2 } from 'lucide-react';
@@ -11,7 +12,7 @@ import { MealStatus } from '@/components/meal-status';
 import { formatMealDateTime } from '@/lib/meal-date';
 
 async function request<T>(url: string, payload?: Record<string, unknown>): Promise<T> {
-  const response = await fetch(url, payload ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : { cache: 'no-store' });
+  const response = await gameFetch(url, payload ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) } : { cache: 'no-store' });
   const value = await response.json() as T & { error?: string };
   if (!response.ok) throw new Error(value.error || '暂时无法完成，请重试。');
   return value;
@@ -78,7 +79,7 @@ export default function HistoryView() {
     <main className="history-page">
       <a className="history-back" href="/"><ArrowLeft size={16} />回到餐馆清单</a>
       <div className="history-heading"><div><h1>每一顿，都有记录</h1><p>自己发起的、别人发起而你参与的，都能在这里找回。</p></div><History aria-hidden="true" /></div>
-      <p className="history-identity">请使用发起或参与时的同一浏览器查看记录；更换设备或清除浏览器数据后，无法找回原来的身份。</p>
+      <p className="history-identity">{profile?.account?.signed_in?"记录已随账号保存，在其他设备登录同一账号也能找回。":"当前显示此浏览器的记录。点击顶部用户名登录后，可在其他设备找回昵称和历史。"}</p>
       <div className="history-toolbar">
         <div className="history-tabs" aria-label="记录分类">
           <Button variant="ghost" aria-pressed={view==='all'} disabled={busy} onClick={() => switchTab('all')}>全部</Button>
