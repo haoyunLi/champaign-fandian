@@ -12,6 +12,7 @@ export const rooms = sqliteTable('rooms', {
   creationRequestHash: text('creation_request_hash'), ordersStoppedAt: text('orders_stopped_at'),
   decidedAt: text('decided_at'), completedAt: text('completed_at'), completionReason: text('completion_reason'),
   createdAt: text('created_at').notNull(), revision: integer('revision').notNull().default(0), deletedAt: text('deleted_at'),
+  votingDeadlineAt: text('voting_deadline_at'),
 }, t => [index('idx_rooms_owner_created').on(t.owner, t.createdAt)]);
 export const candidates = sqliteTable('candidates', {
   id: text('id').primaryKey(), roomId: text('room_id').notNull().references(() => rooms.id),
@@ -29,6 +30,7 @@ export const orders = sqliteTable('orders', {
   nickname: text('nickname').notNull(), dish: text('dish').notNull(), quantity: integer('quantity').notNull(), note: text('note').notNull().default(''),
   creationRequestHash: text('creation_request_hash'),
   status: text('status').notNull().default('pending'), revision: integer('revision').notNull().default(0), claimant: text('claimant'), claimantName: text('claimant_name'), createdAt: text('created_at').notNull(),
+  purchaseStatus:text('purchase_status').notNull().default('unplaced'),issueNote:text('issue_note').notNull().default(''),changeRequest:text('change_request'),
 }, t => [index('idx_orders_room_created').on(t.roomId,t.createdAt), index('idx_orders_owner_room').on(t.owner,t.roomId), index('idx_orders_claimant_room').on(t.claimant,t.roomId)]);
 export const roomHistory = sqliteTable('room_history', {
   owner: text('owner').notNull(), roomId: text('room_id').notNull().references(() => rooms.id),
@@ -63,3 +65,7 @@ export const pickupPlans = sqliteTable('pickup_plans', {
   roomId:text('room_id').notNull().references(()=>rooms.id),owner:text('owner').notNull(),
   time:text('time').notNull().default(''),place:text('place').notNull().default(''),revision:integer('revision').notNull().default(1),
 },t=>[primaryKey({columns:[t.roomId,t.owner]})]);
+export const notifications=sqliteTable('notifications',{
+  id:integer('id').primaryKey({autoIncrement:true}),owner:text('owner').notNull(),roomId:text('room_id').notNull().references(()=>rooms.id),
+  message:text('message').notNull(),createdAt:text('created_at').notNull(),readAt:text('read_at'),
+},t=>[index('idx_notifications_owner_id').on(t.owner,t.id)]);

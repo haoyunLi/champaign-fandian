@@ -101,7 +101,7 @@ export default function HistoryView() {
             <p className="history-date"><CalendarDays size={17} aria-hidden="true"/><span>发起日期 <time dateTime={item.created_at}>{formatMealDateTime(item.created_at)}</time></span></p>
             {item.deleted_at && <p className="history-removed-date">{item.isHost ? '删除于' : '移除于'} <time dateTime={item.deleted_at}>{formatMealDateTime(item.deleted_at)}</time></p>}
             <p className="creator-line">{item.creator_name} 发起{item.isHost&&" · 我"}</p>
-            <p className="history-result">{item.winner_name ? <>选定餐馆 <strong>{item.winner_name}</strong></> : '餐馆尚未确定'}</p>
+            <p className="history-result">{item.winner_name ? <>选定餐馆 <strong>{item.winner_name}</strong></> : item.completion_reason==='no_votes'?'截止前无人投票，未产生结果':'餐馆尚未确定'}</p>
             <p className="history-counts"><b className="history-role">{item.isHost ? '我发起的' : '参与或保存'}</b><span>·</span>{item.mode === 'manual' ? '自主投票' : '随机抽签'}<span>·</span>{item.vote_count} 人投票<span>·</span>{item.order_count} 条带饭登记</p>
           </div>
           <div className="history-actions">{trash ? <Button variant="outline" className="secondary" disabled={busy || loading} onClick={() => void restore(item)}><Undo2 />恢复记录</Button> : <>

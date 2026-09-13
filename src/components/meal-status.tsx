@@ -14,9 +14,9 @@ export function useMealPhase(meal: PhaseInfo) {
   },[meal.phase,meal.delivery_deadline_at]);
   return meal.phase==='delivery' && meal.delivery_deadline_at && Date.parse(meal.delivery_deadline_at)<=now ? 'finished' : meal.phase;
 }
-export function MealStatus({meal}:{meal:PhaseInfo}) {
+export function MealStatus({meal}:{meal:PhaseInfo&{completion_reason?:MealLifecycle['completion_reason']}}) {
   const phase=useMealPhase(meal);
-  return <span className={`status ${phase==='finished'?'ended':phase==='delivery'?'delivering':''}`}>{phase==='finished'?'已结束':phase==='delivery'?'带饭中':'投票中'}</span>;
+  return <span className={`status ${phase==='finished'?'ended':phase==='delivery'?'delivering':''}`}>{meal.completion_reason==='no_votes'?'未产生结果':phase==='finished'?'已结束':phase==='delivery'?'带饭中':'投票中'}</span>;
 }
 export function deadlineLabel(value:string|null) {
   return value ? `${formatMealDateTime(value)}（香槟时间）` : '';

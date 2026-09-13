@@ -19,14 +19,15 @@ export function finishMeal(db: D1Database, where: string, values: string[]) {
 
 export function settleMeals(db: D1Database, where: string, values: string[]) {
   return [
-    db.prepare(`UPDATE rooms SET decided_at=?,revision=revision+1 WHERE status='closed' AND decided_at IS NULL AND (${where})`).bind(LEGACY_DELIVERY_START,...values),
+    db.prepare(`UPDATE rooms SET decided_at=?,revision=revision+1 WHERE status='closed' AND decided_at IS NULL AND completed_at IS NULL AND (${where})`).bind(LEGACY_DELIVERY_START,...values),
     finishMeal(db,where,values),
   ];
 }
 
-export type LifecycleRow = { status: string; decided_at: string | null; completed_at: string | null; completion_reason: MealLifecycle['completion_reason'] };
+export type LifecycleRow = { status: string; voting_deadline_at?:string|null; decided_at: string | null; completed_at: string | null; completion_reason: MealLifecycle['completion_reason'] };
 export function mealLifecycle(row: LifecycleRow): MealLifecycle {
   return {
+    voting_deadline_at:row.voting_deadline_at||null,
     phase: row.status==='open' ? 'voting' : row.completed_at ? 'finished' : 'delivery',
     decided_at:row.decided_at,
     delivery_deadline_at:row.decided_at ? new Date(Date.parse(row.decided_at)+12*60*60*1000).toISOString() : null,

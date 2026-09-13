@@ -1,3 +1,5 @@
+import { notifications } from '@/lib/meal-updates';
+import { OPEN_VOTING_SQL,settleVoting,votingDeadline } from '@/lib/voting-deadline';
 import { chatGPTSignInPath, chatGPTSignOutPath } from '@/app/chatgpt-auth';
 import { visitorIdentity } from '@/lib/visitor-identity';
 import { database } from '@/lib/game-db';
@@ -75,10 +77,11 @@ async function seed(db: D1Database, owner: string) {
 async function catalog(db: D1Database, owner: string) {
   await seed(db,'shared');
   await backfillHistory(db,owner);
+  await settleVoting(db,'owner=? OR id IN (SELECT room_id FROM room_history WHERE owner=?)',[owner,owner]).run();
   const visibleFrom=`FROM rooms r LEFT JOIN room_history h ON h.room_id=r.id AND h.owner=?
     WHERE r.deleted_at IS NULL AND (r.owner=? OR (h.room_id IS NOT NULL AND h.hidden_at IS NULL))`;
   const activeFrom=`${visibleFrom} AND (r.status='open' OR (r.status='closed' AND r.completed_at IS NULL))`;
-  const summarySelect=`SELECT r.id,r.title,r.status,r.mode,r.created_at,r.deleted_at,r.decided_at,r.completed_at,r.completion_reason,r.orders_stopped_at,
+  const summarySelect=`SELECT r.id,r.title,r.status,r.mode,r.voting_deadline_at,r.created_at,r.deleted_at,r.decided_at,r.completed_at,r.completion_reason,r.orders_stopped_at,
     COALESCE((SELECT nickname FROM visitor_preferences WHERE owner=r.owner),'未设置昵称') AS creator_name,r.owner=? AS isHost,(SELECT name FROM candidates WHERE id=r.winner_id AND room_id=r.id) AS winner_name,
     (SELECT COUNT(*) FROM votes WHERE room_id=r.id) AS vote_count,(SELECT COUNT(*) FROM orders WHERE room_id=r.id) AS order_count,
     (SELECT COUNT(*) FROM orders WHERE room_id=r.id AND status='pending') AS pending_count,
@@ -87,7 +90,7 @@ async function catalog(db: D1Database, owner: string) {
   const [,,restaurants,rooms,active,total,finished] = await db.batch([
     ...settleMeals(db,'owner=? OR id IN (SELECT room_id FROM room_history WHERE owner=?)',[owner,owner]),
     db.prepare('SELECT id,name,cuisine,address,source,menu_images,media_updated_at,selected,position FROM restaurants WHERE owner=? AND deleted=0 ORDER BY position,id').bind('shared'),
-    db.prepare('SELECT id,title,status,mode,created_at,decided_at,completed_at,completion_reason FROM rooms WHERE owner=? AND deleted_at IS NULL ORDER BY created_at DESC,id DESC LIMIT 8').bind(owner),
+    db.prepare('SELECT id,title,status,mode,voting_deadline_at,created_at,decided_at,completed_at,completion_reason FROM rooms WHERE owner=? AND deleted_at IS NULL ORDER BY created_at DESC,id DESC LIMIT 8').bind(owner),
     db.prepare(`${summarySelect} ${activeFrom} ORDER BY r.created_at DESC,r.id DESC LIMIT 8`).bind(owner,owner,owner),
     db.prepare(`SELECT COUNT(*) AS count ${activeFrom}`).bind(owner,owner),
     db.prepare(`${summarySelect} ${visibleFrom} AND r.status='closed'
@@ -96,10 +99,13 @@ async function catalog(db: D1Database, owner: string) {
       ORDER BY r.completed_at DESC,r.id DESC LIMIT 4`).bind(owner,owner,owner),
   ]);
   const pools=(await db.prepare('SELECT id,name,restaurant_ids,revision FROM restaurant_pools WHERE owner=? AND deleted_at IS NULL ORDER BY created_at,id').bind(owner).all<Omit<RestaurantPool,'restaurant_ids'> & {restaurant_ids:string}>()).results.map(p=>({...p,restaurant_ids:JSON.parse(p.restaurant_ids) as string[]}));
-  return { pools,profile:await profile(db,owner),restaurants:(restaurants.results as RestaurantRow[]).map(restaurantWithMedia),
+  const shownMeals=[...active.results,...finished.results] as HomeMeal[];
+  const own=shownMeals.length?(await db.prepare(`SELECT o.id,o.room_id,o.dish,o.quantity,o.status,o.purchase_status,o.issue_note,o.change_request,COALESCE(p.nickname,o.claimant_name) AS claimant_name,COALESCE(pp.time,'') AS pickup_time,COALESCE(pp.place,'') AS pickup_place FROM orders o LEFT JOIN visitor_preferences p ON p.owner=o.claimant LEFT JOIN pickup_plans pp ON pp.room_id=o.room_id AND pp.owner=o.claimant WHERE o.owner=? AND o.room_id IN (${shownMeals.map(()=>'?').join(',')}) ORDER BY o.created_at,o.id`).bind(owner,...shownMeals.map(r=>r.id)).all<{room_id:string;change_request:string|null}>()).results:[];
+  const personal=(id:string)=>own.filter(o=>o.room_id===id).map(o=>({...o,change_request:o.change_request?JSON.parse(o.change_request):null}));
+  return { notifications:await notifications(db,owner),pools,profile:await profile(db,owner),restaurants:(restaurants.results as RestaurantRow[]).map(restaurantWithMedia),
     rooms:(rooms.results as (LifecycleRow & {id:string;title:string;mode:VotingMode})[]).map(row=>({...row,...mealLifecycle(row)})),
-    activeRooms:(active.results as HomeMeal[]).map(row=>({...row,...mealLifecycle(row),isHost:!!row.isHost})),
-    recentFinishedRooms:(finished.results as HomeMeal[]).map(row=>({...row,...mealLifecycle(row),isHost:!!row.isHost})),
+    activeRooms:(active.results as HomeMeal[]).map(row=>({...row,...mealLifecycle(row),isHost:!!row.isHost,my_orders:personal(row.id)})),
+    recentFinishedRooms:(finished.results as HomeMeal[]).map(row=>({...row,...mealLifecycle(row),isHost:!!row.isHost,my_orders:personal(row.id)})),
     activeRoomCount:Number((total.results[0] as {count:number}|undefined)?.count || 0) };
 }
 async function backfillHistory(db: D1Database, owner: string) {
@@ -133,9 +139,10 @@ async function historyPage(db: D1Database, owner: string, url: URL): Promise<His
     } catch { throw new UserError('历史记录页码无效，请重新打开历史记录。'); }
   }
   await backfillHistory(db,owner);
+  await settleVoting(db,'owner=? OR id IN (SELECT room_id FROM room_history WHERE owner=?)',[owner,owner]).run();
   await db.batch(settleMeals(db,'owner=? OR id IN (SELECT room_id FROM room_history WHERE owner=?)',[owner,owner]));
   const rows = (await db.prepare(`WITH viewer AS (SELECT ? AS owner)
-    SELECT r.id,r.title,r.status,r.mode,r.created_at,r.decided_at,r.completed_at,r.completion_reason,
+    SELECT r.id,r.title,r.status,r.mode,r.voting_deadline_at,r.created_at,r.decided_at,r.completed_at,r.completion_reason,
     CASE WHEN r.owner=viewer.owner THEN r.deleted_at ELSE h.hidden_at END AS deleted_at,
     COALESCE((SELECT nickname FROM visitor_preferences WHERE owner=r.owner),'未设置昵称') AS creator_name,r.owner=viewer.owner AS isHost,c.name AS winner_name,
     (SELECT COUNT(*) FROM votes v WHERE v.room_id=r.id) AS vote_count,
@@ -153,6 +160,7 @@ async function historyPage(db: D1Database, owner: string, url: URL): Promise<His
   return { profile:await profile(db,owner),rooms, nextCursor: rows.length > 20 && last ? JSON.stringify({createdAt:last.created_at,id:last.id}) : null };
 }
 async function roomState(db: D1Database, id: string, owner: string): Promise<Room> {
+  await settleVoting(db,'id=?',[id]).run();
   const [,,roomRows,candidates,votes,myVote,orders,history,preferences,people,pickup] = await db.batch([
     ...settleMeals(db,'id=?',[id]),
     db.prepare("SELECT *,COALESCE((SELECT nickname FROM visitor_preferences WHERE owner=rooms.owner),'未设置昵称') AS creator_name FROM rooms WHERE id=? AND deleted_at IS NULL").bind(id),
@@ -181,7 +189,15 @@ async function roomState(db: D1Database, id: string, owner: string): Promise<Roo
   if (!room) throw new UserError('这轮投票不存在或已被发起人删除。发起人可在历史记录的回收站中恢复。',404);
   const personalHistory=history.results[0] as {hidden_at:string|null}|undefined;
   const participated=myVote.results.length>0 || (orders.results as {owner:string;claimant:string|null}[]).some(o=>o.owner===owner||o.claimant===owner);
-  return { myPickupPlan:(pickup.results[0] as PickupPlan|undefined)||{time:'',place:'',revision:0},canEditPickupPlan:(orders.results as {claimant:string;status:string}[]).some(o=>o.claimant===owner&&o.status==='claimed'),...mealLifecycle(room),profile:(preferences.results[0] as Profile|undefined)||{nickname:'',revision:0},creator_name:room.creator_name,members:(people.results as Member[]).map(p=>({...p,isMe:!!p.isMe,isHost:!!p.isHost,hasVoted:!!p.hasVoted})),orders_stopped_at:room.orders_stopped_at,canStopOrders:room.owner===owner || (orders.results as {status:string;claimant:string|null}[]).some(o=>o.status==='claimed'&&o.claimant===owner),preferred_nickname:String((preferences.results[0] as {nickname:string}|undefined)?.nickname || ''),id:room.id,title:room.title,status:room.status,mode:room.mode,winner_id:room.winner_id,created_at:room.created_at,revision:room.revision,isHost:room.owner===owner,inHistory:room.owner===owner || (personalHistory ? personalHistory.hidden_at===null : participated),candidates:(candidates.results as RestaurantRow[]).map(restaurantWithMedia),votes:votes.results as Vote[],myVote:myVote.results[0] as Vote||null,total:votes.results.length,orders:(orders.results as (FoodOrder & {owner:string;claimant:string|null;display_nickname:string;display_claimant:string|null})[]).map(o=>({id:o.id,pickup_time:o.pickup_time,pickup_place:o.pickup_place,nickname:o.display_nickname,dish:o.dish,quantity:o.quantity,note:o.note,status:o.status,revision:o.revision,isCarrier:o.claimant===owner,claimant_name:o.display_claimant,created_at:o.created_at,isMine:o.owner===owner,canManage:o.claimant===owner||room.owner===owner})) };
+  const winner=(candidates.results as RestaurantRow[]).find(c=>c.id===room.winner_id);
+  const matchingRestaurants=winner?(await db.prepare("SELECT id FROM restaurants WHERE owner='shared' AND deleted=0 AND name=? AND cuisine=? AND address=? LIMIT 2").bind(winner.name,winner.cuisine,winner.address).all<{id:string}>()).results:[];
+  const allowLegacy=matchingRestaurants.length===1&&(!winner?.restaurant_id||matchingRestaurants[0].id===winner.restaurant_id);
+  const recent=winner?(await db.prepare(`SELECT o.dish,o.quantity,o.note FROM orders o JOIN rooms r ON r.id=o.room_id JOIN candidates c ON c.id=r.winner_id
+    WHERE o.owner=? AND o.room_id<>? AND r.deleted_at IS NULL AND c.room_id=r.id
+    AND ((? IS NOT NULL AND c.restaurant_id=?) OR (?=1 AND c.restaurant_id IS NULL AND c.name=? AND c.cuisine=? AND c.address=?))
+    ORDER BY o.created_at DESC,o.id DESC LIMIT 50`).bind(owner,id,winner.restaurant_id||null,winner.restaurant_id||null,allowLegacy?1:0,winner.name,winner.cuisine,winner.address).all<{dish:string;quantity:number;note:string}>()).results:[];
+  const uniqueDishes=recent.filter((o,i)=>recent.findIndex(other=>other.dish===o.dish&&other.note===o.note)===i).slice(0,5);
+  return { notifications:await notifications(db,owner),recentDishes:uniqueDishes,myPickupPlan:(pickup.results[0] as PickupPlan|undefined)||{time:'',place:'',revision:0},canEditPickupPlan:(orders.results as {claimant:string;status:string}[]).some(o=>o.claimant===owner&&o.status==='claimed'),...mealLifecycle(room),profile:(preferences.results[0] as Profile|undefined)||{nickname:'',revision:0},creator_name:room.creator_name,members:(people.results as Member[]).map(p=>({...p,isMe:!!p.isMe,isHost:!!p.isHost,hasVoted:!!p.hasVoted})),orders_stopped_at:room.orders_stopped_at,canStopOrders:room.owner===owner || (orders.results as {status:string;claimant:string|null}[]).some(o=>o.status==='claimed'&&o.claimant===owner),preferred_nickname:String((preferences.results[0] as {nickname:string}|undefined)?.nickname || ''),id:room.id,title:room.title,status:room.status,mode:room.mode,winner_id:room.winner_id,created_at:room.created_at,revision:room.revision,isHost:room.owner===owner,inHistory:room.owner===owner || (personalHistory ? personalHistory.hidden_at===null : participated),candidates:(candidates.results as RestaurantRow[]).map(restaurantWithMedia),votes:votes.results as Vote[],myVote:myVote.results[0] as Vote||null,total:votes.results.length,orders:(orders.results as (FoodOrder & {owner:string;claimant:string|null;display_nickname:string;display_claimant:string|null})[]).map(o=>({id:o.id,purchase_status:o.purchase_status,issue_note:o.issue_note,change_request:typeof o.change_request==='string'?JSON.parse(o.change_request):o.change_request,pickup_time:o.pickup_time,pickup_place:o.pickup_place,nickname:o.display_nickname,dish:o.dish,quantity:o.quantity,note:o.note,status:o.status,revision:o.revision,isCarrier:o.claimant===owner,claimant_name:o.display_claimant,created_at:o.created_at,isMine:o.owner===owner,canManage:o.claimant===owner||room.owner===owner})) };
 }
 async function latestMenu(db:D1Database,room:Room,candidateId:string) {
   const candidate=room.candidates.find(c=>c.id===candidateId);
@@ -218,7 +234,11 @@ async function handle(request: Request) {
       let body: Record<string,unknown>;
       try { body=JSON.parse(raw); } catch { throw new UserError('提交内容无效。'); }
       if (!body || typeof body!=='object' || Array.isArray(body)) throw new UserError('提交内容无效。');
-      if (body.action==='saveProfile') {
+      if(body.action==='readUpdates'){
+        if(!Number.isSafeInteger(body.throughId)||Number(body.throughId)<1)throw new UserError('更新编号无效。');
+        await db.prepare("UPDATE notifications SET read_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE owner=? AND id<=? AND read_at IS NULL").bind(owner,body.throughId).run();
+        result={ok:true};
+      } else if (body.action==='saveProfile') {
         result=await saveProfile(db,owner,body);
       } else if (body.action==='savePool') {
         const name=clean(body.name,40,'餐馆池名称');
@@ -346,15 +366,17 @@ async function handle(request: Request) {
         if(ids.length<2) throw new UserError('请选择至少两家不同的餐馆。');
         if(typeof body.requestId!=='string'||!/^[a-f0-9-]{36}$/.test(body.requestId)) throw new UserError('页面已更新，请刷新后重新创建。');
         const id=(await hashText(`create:${owner}:${body.requestId}`)).slice(0,32);
-        const requestHash=await hashText(JSON.stringify({title,mode,restaurantIds:ids}));
+        let deadline:string|null;try{deadline=votingDeadline(body.votingDeadlineAt);}catch(e){throw new UserError((e as Error).message);}
+        const requestHash=await hashText(JSON.stringify({title,mode,restaurantIds:ids,...(deadline?{votingDeadlineAt:deadline}:{})}));
         const existing=await db.prepare('SELECT creation_request_hash FROM rooms WHERE id=? AND owner=?').bind(id,owner).first<{creation_request_hash:string|null}>();
         if(!existing) {
+          if(deadline&&(Date.parse(deadline)<=Date.now()||Date.parse(deadline)>Date.now()+14*86400000))throw new UserError('截止时间请选择未来 14 天内的时间。');
           await seed(db,'shared');
           const rows=(await db.prepare(`SELECT * FROM restaurants WHERE owner='shared' AND deleted=0 AND id IN (${ids.map(()=>'?').join(',')}) ORDER BY position,id`).bind(...ids).all<RestaurantRow>()).results;
           if(rows.length!==ids.length) throw new UserError('候选名单已变化，请刷新后重新选择。');
           // The room and its complete candidate snapshot commit together. Retry IDs are stable.
           await db.batch([
-            db.prepare("INSERT OR IGNORE INTO rooms (id,owner,title,status,created_at,mode,creation_request_hash) VALUES (?,?,?,'open',?,?,?)").bind(id,owner,title,new Date().toISOString(),mode,requestHash),
+            db.prepare("INSERT OR IGNORE INTO rooms (id,owner,title,status,created_at,mode,creation_request_hash,voting_deadline_at) VALUES (?,?,?,'open',?,?,?,?)").bind(id,owner,title,new Date().toISOString(),mode,requestHash,deadline),
             ...rows.map((r,i)=>db.prepare(`INSERT OR IGNORE INTO candidates (id,room_id,name,cuisine,address,source,menu_images,restaurant_id,position)
               SELECT ?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND owner=? AND creation_request_hash=?)`)
               .bind(`${id}-${i+1}`,id,r.name,r.cuisine,r.address,r.source,r.menu_images,r.id,i+1,id,owner,requestHash)),
@@ -397,7 +419,7 @@ async function handle(request: Request) {
           if(!picked) throw new UserError('请选择本轮候选名单中的一家餐馆。');
           try {
             await db.batch([
-              db.prepare('INSERT INTO votes (id,room_id,voter,nickname,nickname_key,candidate_id,created_at) SELECT ?,?,?,COALESCE((SELECT nickname FROM visitor_preferences WHERE owner=?),?),COALESCE((SELECT nickname_key FROM visitor_preferences WHERE owner=?),?),?,? WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND status=\'open\' AND deleted_at IS NULL) AND (SELECT COUNT(*) FROM votes WHERE room_id=?)<200').bind(crypto.randomUUID(),id,owner,owner,nickname,owner,nickname.toLocaleLowerCase(),picked.id,new Date().toISOString(),id,id),
+              db.prepare('INSERT INTO votes (id,room_id,voter,nickname,nickname_key,candidate_id,created_at) SELECT ?,?,?,COALESCE((SELECT nickname FROM visitor_preferences WHERE owner=?),?),COALESCE((SELECT nickname_key FROM visitor_preferences WHERE owner=?),?),?,? WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND status=\'open\' AND deleted_at IS NULL AND (voting_deadline_at IS NULL OR voting_deadline_at>strftime(\'%Y-%m-%dT%H:%M:%fZ\',\'now\'))) AND (SELECT COUNT(*) FROM votes WHERE room_id=?)<200').bind(crypto.randomUUID(),id,owner,owner,nickname,owner,nickname.toLocaleLowerCase(),picked.id,new Date().toISOString(),id,id),
               db.prepare('UPDATE rooms SET revision=revision+1 WHERE id=? AND deleted_at IS NULL').bind(id),
               recordParticipation(db,id,owner),
               db.prepare(`INSERT INTO visitor_preferences (owner,nickname,nickname_key) SELECT voter,nickname,nickname_key FROM votes WHERE room_id=? AND voter=?
@@ -415,9 +437,9 @@ async function handle(request: Request) {
       } else if (body.action==='close') {
         const id=clean(body.room,64,'投票编号');
         const room=await roomState(db,id,owner);
-        if(!room.total) throw new UserError('至少收到一票后才能结束。');
+        if(!room.total&&room.status==='open') throw new UserError('至少收到一票后才能结束。');
         // Anyone with the room link can close voting. Only the first close fixes the winner and delivery clock.
-        await db.prepare("UPDATE rooms SET status='closed',decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),revision=revision+1,winner_id=(SELECT c.id FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id AND v.room_id=c.room_id WHERE c.room_id=? GROUP BY c.id ORDER BY COUNT(v.id) DESC,random() LIMIT 1) WHERE id=? AND status='open' AND deleted_at IS NULL").bind(id,id).run();
+        await db.prepare(`UPDATE rooms SET status='closed',decided_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),revision=revision+1,winner_id=(SELECT c.id FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id AND v.room_id=c.room_id WHERE c.room_id=? GROUP BY c.id ORDER BY COUNT(v.id) DESC,random() LIMIT 1) WHERE id=? AND ${OPEN_VOTING_SQL}` ).bind(id,id).run();
         result=await roomState(db,id,owner);
       } else if (body.action==='stopOrders') {
         const id=clean(body.room,64,'投票编号');
@@ -437,6 +459,42 @@ async function handle(request: Request) {
           }
           result=current;
         }
+      } else if(['markOrdered','markSoldOut','requestChange','acceptChange','rejectChange'].includes(String(body.action))) {
+        const id=clean(body.room,64,'饭局编号'),room=await roomState(db,id,owner),orderId=clean(body.orderId,64,'登记编号');
+        const order=room.orders.find(o=>o.id===orderId);
+        if(!order)throw new UserError('这条登记不存在。',404);
+        if(room.phase!=='delivery')throw mealFinishedError(room);
+        if(order.status!=='claimed')throw new UserError('只有已认领、尚未带回的登记可以操作。',409,'ORDER_CHANGED',room);
+        if(!Number.isInteger(body.expectedRevision)||body.expectedRevision!==order.revision)throw new UserError('登记已变化，请查看最新内容后确认。',409,'ORDER_CHANGED',room);
+        const action=String(body.action);
+        if(action==='requestChange'?!order.isMine:!order.isCarrier)throw new UserError(action==='requestChange'?'只能为自己的登记申请改单。':'请由当前带饭人确认。',403);
+        let statement:D1PreparedStatement;
+        const guard=`id=? AND room_id=? AND revision=? AND status='claimed' AND ${action==='requestChange'?'owner':'claimant'}=? AND EXISTS(SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`;
+        const values=[orderId,id,order.revision,owner,id];
+        if(action==='requestChange'){
+          const dish=clean(body.dish,100,'菜名'),note=clean(body.note,240,'备注',false),quantity=body.quantity;
+          if(!Number.isInteger(quantity)||Number(quantity)<1||Number(quantity)>20)throw new UserError('份数请填写 1–20。');
+          if(dish===order.dish&&note===order.note&&quantity===order.quantity)throw new UserError('请填写需要更换的菜品、份数或备注。');
+          statement=db.prepare(`UPDATE orders SET change_request=?,revision=revision+1 WHERE ${guard}`).bind(JSON.stringify({dish,quantity,note}),...values);
+        }else if(action==='acceptChange'){
+          if(!order.change_request)throw new UserError('当前没有待确认的改单申请。',409,'ORDER_CHANGED',room);
+          if(body.confirmRestaurant!==true)throw new UserError('请先与餐馆核对可以修改，再确认改单。');
+          const change=order.change_request;
+          statement=db.prepare(`UPDATE orders SET dish=?,quantity=?,note=?,change_request=NULL,purchase_status='unplaced',issue_note='',revision=revision+1 WHERE ${guard}`).bind(change.dish,change.quantity,change.note,...values);
+        }else if(action==='rejectChange'){
+          if(!order.change_request)throw new UserError('当前没有待确认的改单申请。',409,'ORDER_CHANGED',room);
+          statement=db.prepare(`UPDATE orders SET change_request=NULL,revision=revision+1 WHERE ${guard}`).bind(...values);
+        }else if(action==='markSoldOut'){
+          const issue=clean(body.issue,120,'售罄说明',false)||'菜品售罄，请选择替代菜品。';
+          statement=db.prepare(`UPDATE orders SET purchase_status='sold_out',issue_note=?,revision=revision+1 WHERE ${guard}`).bind(issue,...values);
+        }else{
+          if(order.change_request)throw new UserError('请先处理改单申请，再确认下单。',409);
+          statement=db.prepare(`UPDATE orders SET purchase_status='ordered',issue_note='',revision=revision+1 WHERE ${guard} AND change_request IS NULL`).bind(...values);
+        }
+        const [changed]=await db.batch([statement,db.prepare('UPDATE rooms SET revision=revision+1 WHERE id=? AND changes()>0').bind(id)]);
+        const current=await roomState(db,id,owner);
+        if(!changed.meta.changes)throw new UserError('登记或饭局状态已变化，请查看最新内容。',409,'ORDER_CHANGED',current);
+        result=current;
       } else if (body.action==='order' || body.action==='editOrder' || body.action==='claim' || body.action==='deliver' || body.action==='release' || body.action==='cancelOrder') {
         const id=clean(body.room,64,'投票编号');
         const room=await roomState(db,id,owner);
@@ -487,7 +545,10 @@ async function handle(request: Request) {
             statement=db.prepare(`DELETE FROM orders WHERE id=? AND room_id=? AND owner=? AND status='pending' AND revision=? AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,owner,body.expectedRevision,id);
           } else {
             if(!order.canManage) throw new UserError('只有带饭人或本轮发起人可以操作。',403);
-            statement=body.action==='deliver' ? db.prepare(`UPDATE orders SET status='delivered',revision=revision+1 WHERE id=? AND room_id=? AND status='claimed' AND revision=? AND (claimant=? OR EXISTS(SELECT 1 FROM rooms WHERE id=? AND owner=?)) AND (?=1 OR EXISTS (SELECT 1 FROM orders other WHERE other.room_id=orders.room_id AND other.id<>orders.id AND other.status<>'delivered')) AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,body.expectedRevision,owner,id,owner,body.confirmFinish===true?1:0,id) : db.prepare(`UPDATE orders SET status='pending',claimant=NULL,claimant_name=NULL,revision=revision+1 WHERE id=? AND room_id=? AND status='claimed' AND revision=? AND (claimant=? OR EXISTS(SELECT 1 FROM rooms WHERE id=? AND owner=?)) AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,body.expectedRevision,owner,id,owner,id);
+            if(order.change_request)throw new UserError('请先由带饭人处理改单申请。',409,'ORDER_CHANGED',room);
+            if(body.action==='deliver'&&order.purchase_status==='sold_out')throw new UserError('菜品售罄，解决换菜并确认下单后才能标记带回。',409);
+            if(body.action==='release'&&order.purchase_status==='ordered')throw new UserError('已经下单，不能直接退回认领。请先与餐馆和收餐人联系处理。',409);
+            statement=body.action==='deliver' ? db.prepare(`UPDATE orders SET status='delivered',revision=revision+1 WHERE id=? AND room_id=? AND status='claimed' AND purchase_status<>'sold_out' AND change_request IS NULL AND revision=? AND (claimant=? OR EXISTS(SELECT 1 FROM rooms WHERE id=? AND owner=?)) AND (?=1 OR EXISTS (SELECT 1 FROM orders other WHERE other.room_id=orders.room_id AND other.id<>orders.id AND other.status<>'delivered')) AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,body.expectedRevision,owner,id,owner,body.confirmFinish===true?1:0,id) : db.prepare(`UPDATE orders SET status='pending',purchase_status='unplaced',issue_note='',claimant=NULL,claimant_name=NULL,revision=revision+1 WHERE id=? AND room_id=? AND status='claimed' AND purchase_status<>'ordered' AND change_request IS NULL AND revision=? AND (claimant=? OR EXISTS(SELECT 1 FROM rooms WHERE id=? AND owner=?)) AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})`).bind(orderId,id,body.expectedRevision,owner,id,owner,id);
           }
         }
         // Preserve the existing order owner and claimant before cancellation or release,
