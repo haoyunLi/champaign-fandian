@@ -1,6 +1,7 @@
 import { chatGPTSignInPath, chatGPTSignOutPath } from '@/app/chatgpt-auth';
 import { visitorIdentity } from '@/lib/visitor-identity';
 import { database } from '@/lib/game-db';
+import { MenuError, menuIds, restaurantWebsite, restaurantWithMedia } from '@/lib/restaurant-media';
 import { seeds } from '@/lib/seeds';
 import { PayloadTooLargeError, readRequestText } from '@/lib/request-body';
 import { ACTIVE_DELIVERY_SQL, finishMeal, mealLifecycle, settleMeals, type LifecycleRow } from '@/lib/meal-lifecycle';
@@ -8,6 +9,7 @@ import type { Restaurant, Room, Vote, FoodOrder, HistoryRoom, HistoryPage, HomeM
 
 export const dynamic = 'force-dynamic';
 class UserError extends Error { constructor(message: string, public status = 400, public code?: string, public room?: Room) { super(message); } }
+type RestaurantRow = Omit<Restaurant,'menu_images'> & {menu_images:string};
 type OrderSubmission = {nickname:string;dish:string;quantity:number;note:string};
 function orderSubmission(body: Record<string,unknown>): OrderSubmission {
   const nickname=clean(body.nickname,24,'群昵称'),dish=clean(body.dish,100,'菜名'),note=clean(body.note,240,'备注',false),quantity=body.quantity;
@@ -84,7 +86,7 @@ async function catalog(db: D1Database, owner: string) {
     (SELECT COUNT(*) FROM orders WHERE room_id=r.id AND status='delivered') AS delivered_count`;
   const [,,restaurants,rooms,active,total,finished] = await db.batch([
     ...settleMeals(db,'owner=? OR id IN (SELECT room_id FROM room_history WHERE owner=?)',[owner,owner]),
-    db.prepare('SELECT id,name,cuisine,address,source,selected,position FROM restaurants WHERE owner=? AND deleted=0 ORDER BY position,id').bind('shared'),
+    db.prepare('SELECT id,name,cuisine,address,source,menu_images,selected,position FROM restaurants WHERE owner=? AND deleted=0 ORDER BY position,id').bind('shared'),
     db.prepare('SELECT id,title,status,mode,created_at,decided_at,completed_at,completion_reason FROM rooms WHERE owner=? AND deleted_at IS NULL ORDER BY created_at DESC,id DESC LIMIT 8').bind(owner),
     db.prepare(`${summarySelect} ${activeFrom} ORDER BY r.created_at DESC,r.id DESC LIMIT 8`).bind(owner,owner,owner),
     db.prepare(`SELECT COUNT(*) AS count ${activeFrom}`).bind(owner,owner),
@@ -93,7 +95,7 @@ async function catalog(db: D1Database, owner: string) {
       AND EXISTS (SELECT 1 FROM orders WHERE room_id=r.id)
       ORDER BY r.completed_at DESC,r.id DESC LIMIT 4`).bind(owner,owner,owner),
   ]);
-  return { profile:await profile(db,owner),restaurants:restaurants.results,
+  return { profile:await profile(db,owner),restaurants:(restaurants.results as RestaurantRow[]).map(restaurantWithMedia),
     rooms:(rooms.results as (LifecycleRow & {id:string;title:string;mode:VotingMode})[]).map(row=>({...row,...mealLifecycle(row)})),
     activeRooms:(active.results as HomeMeal[]).map(row=>({...row,...mealLifecycle(row),isHost:!!row.isHost})),
     recentFinishedRooms:(finished.results as HomeMeal[]).map(row=>({...row,...mealLifecycle(row),isHost:!!row.isHost})),
@@ -153,7 +155,7 @@ async function roomState(db: D1Database, id: string, owner: string): Promise<Roo
   const [,,roomRows,candidates,votes,myVote,orders,history,preferences,people] = await db.batch([
     ...settleMeals(db,'id=?',[id]),
     db.prepare("SELECT *,COALESCE((SELECT nickname FROM visitor_preferences WHERE owner=rooms.owner),'未设置昵称') AS creator_name FROM rooms WHERE id=? AND deleted_at IS NULL").bind(id),
-    db.prepare('SELECT c.id,c.name,c.cuisine,c.address,c.source,c.position,COUNT(v.id) AS count FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id AND v.room_id=c.room_id WHERE c.room_id=? GROUP BY c.id ORDER BY c.position').bind(id),
+    db.prepare('SELECT c.id,c.name,c.cuisine,c.address,c.source,c.menu_images,c.position,COUNT(v.id) AS count FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id AND v.room_id=c.room_id WHERE c.room_id=? GROUP BY c.id ORDER BY c.position').bind(id),
     db.prepare('SELECT COALESCE(p.nickname,v.nickname) AS nickname,candidate_id,created_at FROM votes v LEFT JOIN visitor_preferences p ON p.owner=v.voter WHERE room_id=? ORDER BY created_at DESC').bind(id),
     db.prepare('SELECT COALESCE(p.nickname,v.nickname) AS nickname,candidate_id,created_at FROM votes v LEFT JOIN visitor_preferences p ON p.owner=v.voter WHERE room_id=? AND voter=?').bind(id,owner),
     db.prepare('SELECT o.*,COALESCE(p.nickname,o.nickname) AS display_nickname,COALESCE(c.nickname,o.claimant_name) AS display_claimant FROM orders o LEFT JOIN visitor_preferences p ON p.owner=o.owner LEFT JOIN visitor_preferences c ON c.owner=o.claimant WHERE room_id=? ORDER BY created_at,id').bind(id),
@@ -177,7 +179,7 @@ async function roomState(db: D1Database, id: string, owner: string): Promise<Roo
   if (!room) throw new UserError('这轮投票不存在或已被发起人删除。发起人可在历史记录的回收站中恢复。',404);
   const personalHistory=history.results[0] as {hidden_at:string|null}|undefined;
   const participated=myVote.results.length>0 || (orders.results as {owner:string;claimant:string|null}[]).some(o=>o.owner===owner||o.claimant===owner);
-  return { ...mealLifecycle(room),profile:(preferences.results[0] as Profile|undefined)||{nickname:'',revision:0},creator_name:room.creator_name,members:(people.results as Member[]).map(p=>({...p,isMe:!!p.isMe,isHost:!!p.isHost,hasVoted:!!p.hasVoted})),orders_stopped_at:room.orders_stopped_at,canStopOrders:room.owner===owner || (orders.results as {status:string;claimant:string|null}[]).some(o=>o.status==='claimed'&&o.claimant===owner),preferred_nickname:String((preferences.results[0] as {nickname:string}|undefined)?.nickname || ''),id:room.id,title:room.title,status:room.status,mode:room.mode,winner_id:room.winner_id,created_at:room.created_at,revision:room.revision,isHost:room.owner===owner,inHistory:room.owner===owner || (personalHistory ? personalHistory.hidden_at===null : participated),candidates:candidates.results as Restaurant[],votes:votes.results as Vote[],myVote:myVote.results[0] as Vote||null,total:votes.results.length,orders:(orders.results as (FoodOrder & {owner:string;claimant:string|null;display_nickname:string;display_claimant:string|null})[]).map(o=>({id:o.id,nickname:o.display_nickname,dish:o.dish,quantity:o.quantity,note:o.note,status:o.status,revision:o.revision,isCarrier:o.claimant===owner,claimant_name:o.display_claimant,created_at:o.created_at,isMine:o.owner===owner,canManage:o.claimant===owner||room.owner===owner})) };
+  return { ...mealLifecycle(room),profile:(preferences.results[0] as Profile|undefined)||{nickname:'',revision:0},creator_name:room.creator_name,members:(people.results as Member[]).map(p=>({...p,isMe:!!p.isMe,isHost:!!p.isHost,hasVoted:!!p.hasVoted})),orders_stopped_at:room.orders_stopped_at,canStopOrders:room.owner===owner || (orders.results as {status:string;claimant:string|null}[]).some(o=>o.status==='claimed'&&o.claimant===owner),preferred_nickname:String((preferences.results[0] as {nickname:string}|undefined)?.nickname || ''),id:room.id,title:room.title,status:room.status,mode:room.mode,winner_id:room.winner_id,created_at:room.created_at,revision:room.revision,isHost:room.owner===owner,inHistory:room.owner===owner || (personalHistory ? personalHistory.hidden_at===null : participated),candidates:(candidates.results as RestaurantRow[]).map(restaurantWithMedia),votes:votes.results as Vote[],myVote:myVote.results[0] as Vote||null,total:votes.results.length,orders:(orders.results as (FoodOrder & {owner:string;claimant:string|null;display_nickname:string;display_claimant:string|null})[]).map(o=>({id:o.id,nickname:o.display_nickname,dish:o.dish,quantity:o.quantity,note:o.note,status:o.status,revision:o.revision,isCarrier:o.claimant===owner,claimant_name:o.display_claimant,created_at:o.created_at,isMine:o.owner===owner,canManage:o.claimant===owner||room.owner===owner})) };
 }
 async function handle(request: Request) {
   let cookie: string | null = null;
@@ -243,14 +245,26 @@ async function handle(request: Request) {
       } else if (body.action==='saveRestaurant') {
         await seed(db,'shared');
         const name=clean(body.name,60,'餐馆名称'), cuisine=clean(body.cuisine,40,'餐馆类型',false),address=clean(body.address,160,'地址',false);
-        if (body.id) {
-          const id=clean(body.id,80,'餐馆编号');
-          const changed=await db.prepare('UPDATE restaurants SET name=?,cuisine=?,address=?,source=CASE WHEN name=? AND address=? THEN source ELSE \'\' END WHERE id=? AND owner=? AND deleted=0').bind(name,cuisine,address,name,address,id,'shared').run();
-          if (!changed.meta.changes) throw new UserError('餐馆不存在。',404);
-        } else {
-          const added=await db.prepare('INSERT INTO restaurants (id,owner,name,cuisine,address,source,selected,position) SELECT ?,?,?,?,?,\'\',1,? WHERE (SELECT COUNT(*) FROM restaurants WHERE owner=\'shared\' AND deleted=0)<100').bind(crypto.randomUUID(),'shared',name,cuisine,address,Date.now()).run();
-          if(!added.meta.changes) throw new UserError('餐馆库最多保存 100 家餐馆。');
-        }
+        const id=body.id ? clean(body.id,80,'餐馆编号') : crypto.randomUUID();
+        const old=body.id ? await db.prepare("SELECT source,menu_images FROM restaurants WHERE id=? AND owner='shared' AND deleted=0").bind(id).first<{source:string;menu_images:string}>() : null;
+        if(body.id && !old) throw new UserError('餐馆不存在。',404);
+        // Omitted fields from an older client must not erase menus or website links.
+        const source=body.source===undefined ? old?.source || '' : restaurantWebsite(body.source);
+        const images=body.menu_images===undefined ? old?.menu_images || '[]' : JSON.stringify(menuIds(body.menu_images));
+        const validImages=`NOT EXISTS (SELECT 1 FROM json_each(?) j LEFT JOIN menu_images m ON m.id=j.value
+          WHERE m.id IS NULL OR m.ready<>1 OR (m.published=0 AND m.owner<>?))`;
+        const mutation=body.id
+          ? db.prepare(`UPDATE restaurants SET name=?,cuisine=?,address=?,source=?,menu_images=?
+              WHERE id=? AND owner='shared' AND deleted=0 AND ${validImages}`).bind(name,cuisine,address,source,images,id,images,owner)
+          : db.prepare(`INSERT INTO restaurants (id,owner,name,cuisine,address,source,menu_images,selected,position)
+              SELECT ?,'shared',?,?,?,?,?,1,? WHERE (SELECT COUNT(*) FROM restaurants WHERE owner='shared' AND deleted=0)<100
+              AND ${validImages}`).bind(id,name,cuisine,address,source,images,Date.now(),images,owner);
+        const [changed]=await db.batch([
+          mutation,
+          db.prepare(`UPDATE menu_images SET published=1 WHERE id IN
+            (SELECT value FROM json_each((SELECT menu_images FROM restaurants WHERE id=? AND owner='shared' AND deleted=0)))`).bind(id),
+        ]);
+        if(!changed.meta.changes) throw new UserError('餐馆未保存：菜单图片已过期、尚未上传完成，或餐馆库已满。请重新选择图片或刷新列表后再试。',409);
         result=await catalog(db,owner);
       } else if (body.action==='deleteRestaurant' || body.action==='restoreRestaurant') {
         const id=clean(body.id,80,'餐馆编号');
@@ -277,14 +291,14 @@ async function handle(request: Request) {
         const existing=await db.prepare('SELECT creation_request_hash FROM rooms WHERE id=? AND owner=?').bind(id,owner).first<{creation_request_hash:string|null}>();
         if(!existing) {
           await seed(db,'shared');
-          const rows=(await db.prepare(`SELECT * FROM restaurants WHERE owner='shared' AND deleted=0 AND id IN (${ids.map(()=>'?').join(',')}) ORDER BY position,id`).bind(...ids).all<Restaurant>()).results;
+          const rows=(await db.prepare(`SELECT * FROM restaurants WHERE owner='shared' AND deleted=0 AND id IN (${ids.map(()=>'?').join(',')}) ORDER BY position,id`).bind(...ids).all<RestaurantRow>()).results;
           if(rows.length!==ids.length) throw new UserError('候选名单已变化，请刷新后重新选择。');
           // The room and its complete candidate snapshot commit together. Retry IDs are stable.
           await db.batch([
             db.prepare("INSERT OR IGNORE INTO rooms (id,owner,title,status,created_at,mode,creation_request_hash) VALUES (?,?,?,'open',?,?,?)").bind(id,owner,title,new Date().toISOString(),mode,requestHash),
-            ...rows.map((r,i)=>db.prepare(`INSERT OR IGNORE INTO candidates (id,room_id,name,cuisine,address,source,position)
-              SELECT ?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND owner=? AND creation_request_hash=?)`)
-              .bind(`${id}-${i+1}`,id,r.name,r.cuisine,r.address,r.source,i+1,id,owner,requestHash)),
+            ...rows.map((r,i)=>db.prepare(`INSERT OR IGNORE INTO candidates (id,room_id,name,cuisine,address,source,menu_images,position)
+              SELECT ?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND owner=? AND creation_request_hash=?)`)
+              .bind(`${id}-${i+1}`,id,r.name,r.cuisine,r.address,r.source,r.menu_images,i+1,id,owner,requestHash)),
           ]);
         }
         const saved=existing || await db.prepare('SELECT creation_request_hash FROM rooms WHERE id=? AND owner=?').bind(id,owner).first<{creation_request_hash:string|null}>();
@@ -302,8 +316,8 @@ async function handle(request: Request) {
           await db.batch([
             db.prepare(`INSERT OR IGNORE INTO rooms (id,owner,title,status,created_at,mode)
               SELECT ?,?,title,'open',?,mode FROM rooms WHERE id=? AND deleted_at IS NULL`).bind(id,owner,new Date().toISOString(),sourceId),
-            db.prepare(`INSERT OR IGNORE INTO candidates (id,room_id,name,cuisine,address,source,position)
-              SELECT ? || '-' || c.position,?,c.name,c.cuisine,c.address,c.source,c.position FROM candidates c
+            db.prepare(`INSERT OR IGNORE INTO candidates (id,room_id,name,cuisine,address,source,menu_images,position)
+              SELECT ? || '-' || c.position,?,c.name,c.cuisine,c.address,c.source,c.menu_images,c.position FROM candidates c
               JOIN rooms original ON original.id=c.room_id
               WHERE c.room_id=? AND original.deleted_at IS NULL AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND owner=?)`).bind(id,id,sourceId,id,owner),
           ]);
@@ -459,6 +473,7 @@ async function handle(request: Request) {
     if(cookie) headers['Set-Cookie']=cookie;
     return Response.json(result,{headers});
   } catch(error) {
+    if(error instanceof MenuError) error=new UserError(error.message,error.status);
     if(error instanceof PayloadTooLargeError) error=new UserError('提交内容过长。',413);
     if(error instanceof UserError&&error.room){error.room.profile.account=account;error.room.profile.sign_in_path=authAvailable?chatGPTSignInPath(`/?room=${encodeURIComponent(error.room.id)}`):undefined;error.room.profile.sign_out_path=authAvailable?chatGPTSignOutPath(`/?room=${encodeURIComponent(error.room.id)}`):undefined;}
     if(!(error instanceof UserError)) console.error('Fandian request failed',error);

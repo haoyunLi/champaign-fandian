@@ -1,7 +1,7 @@
 export type AccountSession = { signed_in: boolean; email: string | null };
 export type Profile = { nickname: string; revision: number; account?: AccountSession; sign_in_path?: string; sign_out_path?: string };
 export type Member = { nickname: string; isMe: boolean; isHost: boolean; hasVoted: boolean; requests: number; carrying: number; delivered: number };
-export type Restaurant = { id: string; name: string; cuisine: string; address: string; source: string; selected: number; position: number; count?: number };
+export type Restaurant = { id: string; name: string; cuisine: string; address: string; source: string; menu_images: string[]; selected: number; position: number; count?: number };
 export type Vote = { nickname: string; candidate_id: string; created_at: string };
 export type FoodOrder = { id: string; nickname: string; dish: string; quantity: number; note: string; status: 'pending' | 'claimed' | 'delivered'; revision: number; claimant_name: string | null; isMine: boolean; isCarrier: boolean; canManage: boolean; created_at: string };
 export type VotingMode = 'random' | 'manual';

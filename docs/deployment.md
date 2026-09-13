@@ -38,7 +38,7 @@ node --import ./scripts/sites-env.mjs node_modules/wrangler/bin/wrangler.js dev 
 
 仓库 Settings → Pages 中选择 **GitHub Actions**。默认分支 `main` 的工作流会先安装锁定依赖、检查类型与代码、运行测试、安全扫描、生产构建，并两次执行本地迁移；全部成功后才发布 `site-entry/`。拉取请求只运行检查，不发布。
 
-`pages/index.html` 中的正式应用链接与代码仓库链接是公开地址，不是密钥。更换正式域名时修改这两个入口链接。Pages 的 `/history` 不承载历史记录；「查看我的历史」直接打开正式应用的 `/history`。
+`site-entry/index.html` 中的正式应用链接与代码仓库链接是公开地址，不是密钥。更换正式域名时修改这两个入口链接。Pages 的 `/history` 不承载历史记录；「查看我的历史」直接打开正式应用的 `/history`。
 
 ## 维护现有后端
 
@@ -61,7 +61,7 @@ node --import ./scripts/sites-env.mjs node_modules/wrangler/bin/wrangler.js dev 
 
 ## 安全检查的范围
 
-`npm test` 使用真实 API 代码、全部迁移和 SQLite，模拟 D1 的事务接口；它不等同于 Cloudflare 的网络和资源限额测试。发布还需要验证构建后的真实 Worker 和页面。完整审查见 [审计报告](../security-audit.md)。
+`npm test` 使用真实 API 代码、全部迁移和 SQLite，模拟 D1 的事务接口；它不等同于 Cloudflare 的网络和资源限额测试。发布还需要验证构建后的真实 Worker 和页面。完整审查见 [审计报告](security-audit.md)。
 
 当前依赖扫描保留 Drizzle 开发工具链中的 4 个中等级联告警，源头是其旧版 esbuild 开发服务器；应用及迁移生成不调用该服务器。未使用强制降级来隐藏告警。CI 拒绝新增 high/critical 告警，并继续显示中等告警。
 
@@ -80,3 +80,13 @@ node --import ./scripts/sites-env.mjs node_modules/wrangler/bin/wrangler.js dev 
 `src/lib/visitor-identity.ts` 仅在当前 Sites 正式域名及 localhost 测试入口信任平台身份头；其他域名会忽略这些头并隐藏登录链接。独立部署必须先配置能验证身份且剥除外来同名头的可信认证网关，再显式接入，不能直接放开域名判断。邮箱只作为本人账户信息显示，不保存到公开成员记录。
 
 `X-Fandian-Identity` 是不可用于登录的界面身份标记，已登录写入需要匹配当前身份，防止其他标签页切换账号后旧表单误提交。客户端有序建立首次身份，并在身份变化时清除旧身份草稿、刷新页面。浏览器拒收 Cookie 时限制自动刷新，避免无限重载。
+
+## 菜单图片存储
+
+`.openai/hosting.json` 保留原有 `DB`，新增逻辑 R2 绑定 `BUCKET`。`0013` 只增加图片元数据表及餐馆、候选快照的菜单编号 JSON 列，已有餐馆与饭局默认为空菜单。部署前打包这些迁移；不要把图片、数据库或本地 R2 状态放进 GitHub。
+
+`POST /api/menu-images?request=<UUID>` 接收单张图片原始字节，沿用同源及登录身份校验。服务端按实际读取字节限制 5 MB，核对 JPG/PNG/WebP 容器标识，固定返回可信 MIME 与 `nosniff`。图片请求编号与所有者共同确定上传编号，内容指纹约束重试；先预留记录、存储成功后标记就绪，餐馆保存事务只接受已就绪且本人未发布或已公开的图片。
+
+每个身份最多保留 12 张未保存图片、滚动 24 小时最多上传 40 张。上传时清理超过 24 小时的未保存预留（每次最多 50 条），已发布图片保留用于餐馆恢复、旧饭局和重开饭局。该限制面向普通重复操作，游客可换身份，不能代替托管层的流量限制。R2 失败会保留前端文件并允许重试；未使用临时签名链接，因此历史菜单不会因链接过期而失效。
+
+若迁移到自管 Cloudflare，还需创建 R2 桶并绑定为 `BUCKET`；完整迁移需要同时复制 D1 元数据和 R2 `menus/` 对象，不能只迁移数据库。

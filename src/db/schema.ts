@@ -2,7 +2,7 @@ import { sqliteTable, text, integer, uniqueIndex, index, primaryKey } from 'driz
 export const restaurants = sqliteTable('restaurants', {
   id: text('id').primaryKey(), owner: text('owner').notNull(), name: text('name').notNull(),
   cuisine: text('cuisine').notNull(), address: text('address').notNull().default(''),
-  source: text('source').notNull().default(''), selected: integer('selected').notNull().default(1),
+  source: text('source').notNull().default(''), menuImages: text('menu_images').notNull().default('[]'), selected: integer('selected').notNull().default(1),
   position: integer('position').notNull(), deleted: integer('deleted').notNull().default(0),
 }, t => [index('idx_restaurants_owner').on(t.owner)]);
 export const rooms = sqliteTable('rooms', {
@@ -16,7 +16,7 @@ export const rooms = sqliteTable('rooms', {
 export const candidates = sqliteTable('candidates', {
   id: text('id').primaryKey(), roomId: text('room_id').notNull().references(() => rooms.id),
   name: text('name').notNull(), cuisine: text('cuisine').notNull(), address: text('address').notNull(),
-  source: text('source').notNull(), position: integer('position').notNull(),
+  source: text('source').notNull(), menuImages: text('menu_images').notNull().default('[]'), position: integer('position').notNull(),
 }, t => [index('idx_candidates_room').on(t.roomId)]);
 export const votes = sqliteTable('votes', {
   id: text('id').primaryKey(), roomId: text('room_id').notNull().references(() => rooms.id),
@@ -47,3 +47,9 @@ export const cancelledOrderRequests = sqliteTable('cancelled_order_requests', {
 export const accountLinks = sqliteTable('account_links', {
   accountId: text('account_id').primaryKey(), owner: text('owner').notNull(), createdAt: text('created_at').notNull(),
 }, t => [uniqueIndex('idx_account_links_owner').on(t.owner)]);
+
+export const menuImages = sqliteTable('menu_images', {
+  id: text('id').primaryKey(), owner: text('owner').notNull(), contentType: text('content_type').notNull(),
+  size: integer('size').notNull(), contentHash: text('content_hash').notNull(), createdAt: text('created_at').notNull(),
+  ready: integer('ready').notNull().default(0), published: integer('published').notNull().default(0),
+}, t => [index('idx_menu_images_owner_created').on(t.owner,t.createdAt), index('idx_menu_images_staged').on(t.published,t.createdAt)]);
