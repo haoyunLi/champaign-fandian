@@ -11,7 +11,7 @@
 ## 范围与方法
 
 - React 19 / TypeScript 前端：首页、房间、历史、登记、认领、取消、带回与重开。
-- Vinext Worker：`app/api/game/route.ts` 全部 GET/POST 分支、会话、参数、响应投影与数据库原子条件。
+- Vinext Worker：`src/app/api/game/route.ts` 全部 GET/POST 分支、会话、参数、响应投影与数据库原子条件。
 - SQLite/D1：完整迁移、唯一键、外键、候选快照、生命周期和请求重试。
 - 发布：依赖锁文件、脚本、忽略规则、Git 历史、静态入口、GitHub Actions 最小权限和版本固定。
 - 三个独立只读复审覆盖后端、前端和依赖/发布；确认缺陷通过真实 API 代码与隔离 SQLite 重现。另使用本机真实 Worker/D1 及浏览器核对实际页面。
@@ -32,7 +32,7 @@
 
 **原证据：** 原 `route.ts` 的 `await request.text()` 完成后才检查长度。1 MiB 测试请求完整读取后才返回 413，不能限制缓冲内存。
 
-**现位置：** `lib/request-body.ts:4`、`app/api/game/route.ts:166`。
+**原审计位置（目录已整理，行号可能变化）：** `src/lib/request-body.ts:4`、`src/app/api/game/route.ts:166`。
 
 现在按字节边读边限 16 KiB；超出即取消流，Content-Length 只作提前拒绝。测试覆盖无长度、虚假长度、提前拒绝和跨分块中文字符。同时只接受 JSON 请求，并拒绝跨站 Origin / Fetch Metadata 写入。
 
@@ -40,7 +40,7 @@
 
 **原证据：** 同一编号提交菜 A ×1，成功响应丢失后改为菜 B ×2 再提交，会返回 200，但仍保存 A ×1。
 
-**现位置：** `app/api/game/route.ts:15`、`components/food-orders.tsx:24`、`drizzle/0009_next_chronomancer.sql:1`。
+**原审计位置（目录已整理，行号可能变化）：** `src/app/api/game/route.ts:15`、`src/components/food-orders.tsx:24`、`drizzle/0009_next_chronomancer.sql:1`。
 
 保存不可变的首次请求指纹，冲突返回 409；指纹不随之后编辑改变，原请求在编辑、停止加单、完成后仍能安全重试。客户端冻结并暂存未确认的完整提交快照，刷新后可继续找回；已确认保存后使用编辑功能修改。
 
@@ -48,7 +48,7 @@
 
 **原证据：** 打开菜 A 的取消窗口；另一标签页编辑为 B、版本递增；旧窗口仍能删除 B。
 
-**现位置：** `app/api/game/route.ts:350`、`:372`；`components/food-orders.tsx:57`、`:130`。
+**原审计位置（目录已整理，行号可能变化）：** `src/app/api/game/route.ts:350`、`:372`；`src/components/food-orders.tsx:57`、`:130`。
 
 取消与其他登记操作一样检查版本，并在 DELETE 中原子校验。页面发现内容变化会禁用旧确认，要求先查看最新登记。测试覆盖缺失/过期版本、身份权限及编辑和取消并发。
 
@@ -56,19 +56,19 @@
 
 **原证据：** 删除登记会一起删除其请求编号。另一页面保留的旧提交随后重试，可能重新插入同一登记。
 
-**现位置：** `app/api/game/route.ts:368`、`:387`；`drizzle/0010_brainy_secret_warriors.sql:1`。
+**原审计位置（目录已整理，行号可能变化）：** `src/app/api/game/route.ts:368`、`:387`；`drizzle/0010_brainy_secret_warriors.sql:1`。
 
 取消时在同一事务内保留最小请求记录（编号、饭局、身份摘要、取消时间），不保存已删菜品或备注。新增检查该记录，旧重试返回 ORDER_CANCELLED。新编号仍可登记；过期取消不会留下错误记录。
 
 ### UI-01 · Medium · 重开刷新后失去请求编号 · 已修复
 
-**位置：** `components/replay-button.tsx:12`。
+**位置：** `src/components/replay-button.tsx:12`。
 
 未确认的重开编号存入当前标签页会话存储，页面重新挂载也复用。成功后清除；明确的 4xx 也清除，使已删除新局不再永久锁住后续操作；网络/5xx 保留以防重复创建。
 
 ### UI-02 · Low · 连接恢复提示及手机按钮状态 · 已修复
 
-**位置：** `app/page.tsx:122`、`components/food-orders.tsx` 末尾手机操作栏。
+**位置：** `src/app/page.tsx:122`、`src/components/food-orders.tsx` 末尾手机操作栏。
 
 首页将加载错误与创建错误分开，联网恢复后清除正确的提示。停止加单弹窗被远端状态关闭时，手机主操作栏按实际可见弹窗计算，不会继续隐藏。
 
@@ -80,7 +80,7 @@
 
 ### SEC-01 · Low · 发布忽略规则与响应头 · 已修复/加固
 
-`.gitignore` 新增 `.dev.vars*`；扫描未发现实际提交的凭据，无需声称发生过密钥泄露。`worker/index.ts:5` 增加 nosniff、no-referrer 及禁止对象嵌入/限制 base 的 CSP。Pages 使用独立 CSP，不执行 JavaScript，也不访问饭局 API。
+`.gitignore` 新增 `.dev.vars*`；扫描未发现实际提交的凭据，无需声称发生过密钥泄露。`src/worker/index.ts:5` 增加 nosniff、no-referrer 及禁止对象嵌入/限制 base 的 CSP。Pages 使用独立 CSP，不执行 JavaScript，也不访问饭局 API。
 
 ## 剩余问题和明确边界
 
@@ -114,3 +114,11 @@
 - 浏览器核对手机入口、真实创建、随机投票、确认餐馆、登记和过期取消窗口；核心弱网/并发规则由回归测试与前端复审共同覆盖。
 - 已有源代码历史和本次新增文件经过凭据/数据文件检查；保留第三方许可证。
 - GitHub Actions 的实际执行记录可在仓库 Actions 查看；该流程成功后才发布 Pages。
+
+## 用户名与目录整理补充审查 · 2026-09-12
+
+新增可编辑个人昵称、发起人标签和成员角色列表。显示名与浏览器身份分离：请求不能指定要修改的其他人；响应不公开 Cookie、身份哈希或数据库请求指纹。成员列表仅来自当前饭局的发起、投票和带饭记录，不提供全站用户目录或在线跟踪。
+
+昵称冲突与版本冲突会阻止更新；数据库触发器在同一事务中更新投票名字、带饭版本和饭局版本。带饭原始字段保持不变，旧请求指纹和旧版无指纹登记仍可按原内容重试。已结束饭局改名不会重新开放或更改截止时间。
+
+源码移入 `src/`，静态入口移入 `site-entry/`，文档归入 `docs/`。检查包括 26 项自动测试（含有数据的旧库升级、昵称同步与权限、重名回滚、并发修改、旧确认拦截）、生产构建、本地 D1 迁移，以及手机页面设置昵称、创建、投票、认领和改名流程。

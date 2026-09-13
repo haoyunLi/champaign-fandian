@@ -3,7 +3,7 @@
 ## 当前发布结构
 
 - GitHub 仓库保存完整 React 页面、Worker API、D1 结构与迁移、测试和发布入口。
-- GitHub Pages 只发布 `pages/` 中的 HTML、CSS 和图片，提供进入饭点及历史记录的链接。
+- GitHub Pages 只发布 `site-entry/` 中的 HTML、CSS 和图片，提供进入饭点及历史记录的链接。
 - 现有完整应用继续运行于 `https://champaign-fandian.haoyun963.chatgpt.site/`，保留原来的数据库及浏览器身份。
 - Pages 不读取投票数据，不存储昵称或带饭备注，也不通过跨站 Cookie 访问 API。
 
@@ -36,7 +36,7 @@ node --import ./scripts/sites-env.mjs node_modules/wrangler/bin/wrangler.js dev 
 
 ## GitHub Pages
 
-仓库 Settings → Pages 中选择 **GitHub Actions**。默认分支 `main` 的工作流会先安装锁定依赖、检查类型与代码、运行测试、安全扫描、生产构建，并两次执行本地迁移；全部成功后才发布 `pages/`。拉取请求只运行检查，不发布。
+仓库 Settings → Pages 中选择 **GitHub Actions**。默认分支 `main` 的工作流会先安装锁定依赖、检查类型与代码、运行测试、安全扫描、生产构建，并两次执行本地迁移；全部成功后才发布 `site-entry/`。拉取请求只运行检查，不发布。
 
 `pages/index.html` 中的正式应用链接与代码仓库链接是公开地址，不是密钥。更换正式域名时修改这两个入口链接。Pages 的 `/history` 不承载历史记录；「查看我的历史」直接打开正式应用的 `/history`。
 
@@ -44,7 +44,7 @@ node --import ./scripts/sites-env.mjs node_modules/wrangler/bin/wrangler.js dev 
 
 现有后端通过 Sites 的版本发布流程更新，GitHub 推送不会自动更新正式投票应用。发布时将锁定依赖构建出的 Worker、静态资源和 `drizzle/` 迁移一起发布；保持 `.openai/hosting.json` 中已绑定的项目身份，避免新建空数据库。
 
-已有迁移不能改写。结构变更应修改 `db/schema.ts`，执行 `npm run db:generate`，审查新增迁移并在独立数据库中测试，再随版本发布。`0009` 新增可为空的登记请求指纹，`0010` 新增已取消请求编号表，均保留已有记录。
+已有迁移不能改写。结构变更应修改 `src/db/schema.ts`，执行 `npm run db:generate`，审查新增迁移并在独立数据库中测试，再随版本发布。`0009` 新增可为空的登记请求指纹，`0010` 新增已取消请求编号表，均保留已有记录。
 
 不要将 `.env*`、`.dev.vars*`、`.wrangler/`、数据库导出、Cookie、访问令牌或部署凭据提交到 GitHub。调试输出也不要包含这些数据。密钥仅设置在托管平台或 GitHub 环境的 secrets 中。
 
@@ -61,6 +61,12 @@ node --import ./scripts/sites-env.mjs node_modules/wrangler/bin/wrangler.js dev 
 
 ## 安全检查的范围
 
-`npm test` 使用真实 API 代码、全部迁移和 SQLite，模拟 D1 的事务接口；它不等同于 Cloudflare 的网络和资源限额测试。发布还需要验证构建后的真实 Worker 和页面。完整审查见 [审计报告](../security_best_practices_report.md)。
+`npm test` 使用真实 API 代码、全部迁移和 SQLite，模拟 D1 的事务接口；它不等同于 Cloudflare 的网络和资源限额测试。发布还需要验证构建后的真实 Worker 和页面。完整审查见 [审计报告](../security-audit.md)。
 
 当前依赖扫描保留 Drizzle 开发工具链中的 4 个中等级联告警，源头是其旧版 esbuild 开发服务器；应用及迁移生成不调用该服务器。未使用强制降级来隐藏告警。CI 拒绝新增 high/critical 告警，并继续显示中等告警。
+
+## 目录与用户名维护
+
+应用源码集中在 `src/`，GitHub Pages 发布目录为 `site-entry/`，文档位于 `docs/`。根目录保留构建工具默认读取的配置；`drizzle/` 保留在根目录供 Sites 打包迁移。
+
+`0011` 为昵称偏好增加标准化键和版本，并用 SQLite 触发器原子同步投票昵称、带饭登记版本和饭局版本。带饭原始请求字段保持不变，展示名称查询当前个人昵称。昵称冲突会回滚整次更新；旧迁移不能改写。

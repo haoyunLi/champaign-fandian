@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "饭点 · 香槟今天吃什么",
-  description: "香槟饭搭子的吃饭投票：自己选餐馆，或随机抽一家，票数最多的就是今天的目的地。",
+  description: "香槟饭搭子的吃饭投票：自己选餐馆，或随机抽一家，一起决定这顿吃什么。",
   other: {
     "codex-preview": "development",
   },

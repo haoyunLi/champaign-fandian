@@ -35,6 +35,7 @@ export const roomHistory = sqliteTable('room_history', {
 }, t => [primaryKey({columns:[t.owner,t.roomId]})]);
 export const visitorPreferences = sqliteTable('visitor_preferences', {
   owner: text('owner').primaryKey(), nickname: text('nickname').notNull(),
+  nicknameKey: text('nickname_key'), revision: integer('revision').notNull().default(0),
 });
 // Retain only request identities after cancellation so late retries cannot recreate an order.
 export const cancelledOrderRequests = sqliteTable('cancelled_order_requests', {

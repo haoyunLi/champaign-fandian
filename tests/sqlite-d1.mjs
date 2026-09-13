@@ -1,11 +1,11 @@
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 
-export function createDatabase() {
+export function createDatabase({migrationLimit=Infinity}={}) {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec('PRAGMA foreign_keys=ON');
   const journal = JSON.parse(readFileSync(new URL('../drizzle/meta/_journal.json', import.meta.url), 'utf8'));
-  for (const entry of journal.entries) sqlite.exec(readFileSync(new URL(`../drizzle/${entry.tag}.sql`, import.meta.url), 'utf8'));
+  for (const entry of journal.entries.slice(0,migrationLimit)) sqlite.exec(readFileSync(new URL(`../drizzle/${entry.tag}.sql`, import.meta.url), 'utf8'));
   const execute = (sql, values) => {
     const before = sqlite.prepare('SELECT total_changes() AS n').get().n;
     const results = sqlite.prepare(sql).all(...values);

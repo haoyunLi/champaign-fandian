@@ -4,7 +4,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, CalendarDays, History, Loader2, RotateCcw, Soup, Trash2, Undo2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
-import type { HistoryPage, HistoryRoom } from '@/lib/types';
+import type { HistoryPage, HistoryRoom, Profile } from '@/lib/types';
+import { UserProfile } from '@/components/user-profile';
 import { ReplayButton } from '@/components/replay-button';
 import { MealStatus } from '@/components/meal-status';
 import { formatMealDateTime } from '@/lib/meal-date';
@@ -17,6 +18,7 @@ async function request<T>(url: string, payload?: Record<string, unknown>): Promi
 }
 
 export default function HistoryView() {
+  const [profile,setProfile]=useState<Profile>();
   const [view, setView] = useState<'all' | 'hosted' | 'joined' | 'trash'>('all');
   const trash=view==='trash';
   const [rows, setRows] = useState<HistoryRoom[]>([]);
@@ -37,7 +39,7 @@ export default function HistoryView() {
       const page = await request<HistoryPage>(`/api/game?${query}`);
       if (epoch.current !== version) return;
       setRows(previous => next ? [...previous, ...page.rooms.filter(r => !previous.some(p => p.id === r.id))] : page.rooms);
-      setCursor(page.nextCursor);
+      setCursor(page.nextCursor);setProfile(previous=>previous&&previous.revision>page.profile.revision?previous:page.profile);
     } catch (e) { if (epoch.current === version) setError((e as Error).message); }
     finally { if (epoch.current === version) setLoading(false); }
   }, [trash,view]);
@@ -71,6 +73,7 @@ export default function HistoryView() {
       <a href="/" className="brand"><Soup aria-hidden="true" /><span>饭点</span></a>
       <span className="location">Champaign · Urbana</span>
       <nav className="site-nav" aria-label="主导航"><a className="nav-link" href="/">餐馆清单</a><a className="nav-link active" href="/history" aria-current="page">历史记录</a></nav>
+      <UserProfile profile={profile} onSaved={async value=>{setProfile(value);await load();}}/>
     </header>
     <main className="history-page">
       <a className="history-back" href="/"><ArrowLeft size={16} />回到餐馆清单</a>
@@ -96,6 +99,7 @@ export default function HistoryView() {
             <div className="history-title"><h2>{item.title}</h2><MealStatus meal={item} /></div>
             <p className="history-date"><CalendarDays size={17} aria-hidden="true"/><span>发起日期 <time dateTime={item.created_at}>{formatMealDateTime(item.created_at)}</time></span></p>
             {item.deleted_at && <p className="history-removed-date">{item.isHost ? '删除于' : '移除于'} <time dateTime={item.deleted_at}>{formatMealDateTime(item.deleted_at)}</time></p>}
+            <p className="creator-line">{item.creator_name} 发起{item.isHost&&" · 我"}</p>
             <p className="history-result">{item.winner_name ? <>选定餐馆 <strong>{item.winner_name}</strong></> : '餐馆尚未确定'}</p>
             <p className="history-counts"><b className="history-role">{item.isHost ? '我发起的' : '参与或保存'}</b><span>·</span>{item.mode === 'manual' ? '自主投票' : '随机抽签'}<span>·</span>{item.vote_count} 人投票<span>·</span>{item.order_count} 条带饭登记</p>
           </div>

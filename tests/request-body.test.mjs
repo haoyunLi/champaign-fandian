@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PayloadTooLargeError, readRequestText } from '../lib/request-body.ts';
-import { formatMealDateTime } from '../lib/meal-date.ts';
+import { PayloadTooLargeError, readRequestText } from '../src/lib/request-body.ts';
+import { formatMealDateTime } from '../src/lib/meal-date.ts';
 
 test('stream stops after byte limit even without truthful Content-Length', async () => {
   for (const length of [null, '1']) {

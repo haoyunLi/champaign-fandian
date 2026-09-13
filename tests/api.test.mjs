@@ -1,8 +1,9 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createDatabase } from './sqlite-d1.mjs';
-import { GET, POST } from '../app/api/game/route.ts';
+import { GET, POST } from '../src/app/api/game/route.ts';
 
 let db;
 beforeEach(() => { db = createDatabase(); globalThis.__fandianTestDB = db; });
@@ -198,4 +199,112 @@ test('API rejects cross-site requests, non-JSON types and malformed objects', as
   ]) assert.equal((await POST(new Request('https://example.test/api/game', { method: 'POST', headers, body }))).status, status);
   const response = await GET(new Request('https://example.test/api/game'));
   assert.match(response.headers.get('set-cookie'), /HttpOnly.*SameSite=Lax.*Secure/);
+});
+
+const rename = async (who,nickname,expectedRevision) => {
+  const profile = (await call(who)).data.profile;
+  return call(who,{action:'saveProfile',nickname,expectedRevision:expectedRevision??profile.revision});
+};
+test('profile persists, identifies the creator and participants, and changes only the current visitor', async () => {
+  const host=visitor(),guest=visitor(),carrier=visitor();
+  assert.deepEqual((await call(host)).data.profile,{nickname:'',revision:0});
+  const first=await rename(host,'  小李  ');assert.equal(first.status,200);assert.equal(first.data.nickname,'小李');
+  const {room}=await create(host);
+  assert.equal(room.creator_name,'小李');assert.equal(room.members[0].isHost,true);
+  assert.equal((await call(host,{action:'vote',room:room.id,nickname:'旧表单名字',candidateId:room.candidates[0].id})).data.myVote.nickname,'小李');
+  await call(guest,{action:'vote',room:room.id,nickname:'小王',candidateId:room.candidates[0].id});
+  await call(host,{action:'close',room:room.id});
+  const payload={...order(room),nickname:'小王'};await call(guest,payload);
+  await call(carrier,{action:'claim',room:room.id,orderId:payload.orderId,expectedRevision:0,nickname:'小赵'});
+  assert.equal((await rename(host,'李同学')).status,200);
+  assert.equal((await rename(guest,'王同学')).status,200);
+  assert.equal((await rename(carrier,'赵同学')).status,200);
+  const fresh=(await call(guest,undefined,`?room=${room.id}`)).data;
+  assert.equal(fresh.creator_name,'李同学');assert.deepEqual(fresh.votes.map(v=>v.nickname).sort(),['李同学','王同学']);
+  assert.equal(fresh.orders[0].nickname,'王同学');assert.equal(fresh.orders[0].claimant_name,'赵同学');
+  assert.equal(fresh.orders[0].revision,3);assert.equal(fresh.orders[0].status,'claimed');
+  assert.equal(fresh.members.length,3);
+  assert.equal(fresh.members.find(m=>m.isMe).nickname,'王同学');
+  assert.equal(fresh.members.find(m=>m.nickname==='王同学').requests,1);
+  assert.equal(fresh.members.find(m=>m.nickname==='赵同学').carrying,1);
+  assert.equal((await call(host)).data.activeRooms[0].creator_name,'李同学');
+  assert.equal((await call(guest,undefined,'?history=active')).data.rooms[0].creator_name,'李同学');
+  const leak=JSON.stringify(fresh);assert.ok(!leak.includes('voter'));assert.ok(!leak.includes('"owner"'));assert.ok(!leak.includes(host));
+  // A different visitor cannot select somebody else's identity via the request body.
+  await call(carrier,{action:'saveProfile',nickname:'只改我',expectedRevision:1,owner:guest});
+  assert.equal((await call(guest)).data.profile.nickname,'王同学');
+});
+test('nickname conflicts roll back profile and all records; stale profile updates do not overwrite', async () => {
+  const a=visitor(),b=visitor(),{room}=await create(a);
+  await call(a,{action:'vote',room:room.id,nickname:'Alice',candidateId:room.candidates[0].id});
+  await call(b,{action:'vote',room:room.id,nickname:'Bob',candidateId:room.candidates[0].id});
+  const before=(await call(a,undefined,`?room=${room.id}`)).data;
+  assert.equal((await rename(a,'ＢＯＢ')).status,409);
+  const unchanged=(await call(a,undefined,`?room=${room.id}`)).data;
+  assert.equal(unchanged.revision,before.revision);assert.deepEqual(unchanged.profile,before.profile);assert.equal(unchanged.myVote.nickname,'Alice');
+  const accepted=await rename(a,'Alex');assert.equal(accepted.status,200);
+  assert.equal((await rename(a,'旧窗口',before.profile.revision)).status,409);
+  assert.equal((await rename(a,'Alex',before.profile.revision)).status,200);
+  assert.equal((await rename(a,'  ')).status,400);
+  assert.equal((await rename(a,'字'.repeat(25))).status,400);
+  assert.equal((await call(visitor(),{action:'saveProfile',nickname:'新用户',expectedRevision:-1})).status,409);
+});
+test('renaming requester or carrier invalidates old delivery confirmation but preserves original order retries', async () => {
+  const host=visitor(),guest=visitor(),carrier=visitor(),room=await delivery(host),payload=order(room);
+  await call(guest,payload);
+  await call(carrier,{action:'claim',room:room.id,orderId:payload.orderId,expectedRevision:0,nickname:'帮带人'});
+  const old={action:'deliver',room:room.id,orderId:payload.orderId,expectedRevision:1,confirmFinish:true};
+  await rename(guest,'新收餐人');
+  assert.equal((await call(carrier,old)).data.code,'ORDER_CHANGED');
+  assert.equal((await call(guest,payload)).status,200);
+  await rename(carrier,'新带饭人');
+  assert.equal((await call(carrier,{...old,expectedRevision:2})).data.code,'ORDER_CHANGED');
+  const current=(await call(carrier,undefined,`?room=${room.id}`)).data;
+  const done=await call(carrier,{...old,expectedRevision:current.orders[0].revision});assert.equal(done.data.phase,'finished');
+  await rename(guest,'收餐同学');
+  const finished=(await call(carrier,undefined,`?room=${room.id}`)).data;
+  assert.equal(finished.phase,'finished');assert.equal(finished.completed_at,done.data.completed_at);assert.equal(finished.orders[0].nickname,'收餐同学');
+  assert.equal((await call(guest,payload)).status,200);
+});
+test('legacy order payloads and existing profiles survive migration and renaming', async () => {
+  const host=visitor(),guest=visitor(),room=await delivery(host),payload=order(room);
+  await call(guest,payload);
+  db.sqlite.prepare('UPDATE orders SET creation_request_hash=NULL WHERE id=?').run(payload.orderId);
+  await rename(guest,'新昵称');
+  assert.equal((await call(guest,payload)).status,200);
+  assert.equal((await call(guest,{...payload,nickname:'新昵称'})).status,409);
+  assert.equal((await call(guest,undefined,`?room=${room.id}`)).data.orders[0].nickname,'新昵称');
+});
+test('concurrent renames use one accepted revision and concurrent voting keeps the canonical nickname', async () => {
+  const host=visitor(),guest=visitor(),{room}=await create(host);
+  await rename(guest,'原名');
+  const attempts=await Promise.all(['甲同学','乙同学'].map(nickname=>rename(guest,nickname,1)));
+  assert.equal(attempts.filter(r=>r.status===200).length,1);assert.equal(attempts.filter(r=>r.status===409).length,1);
+  const current=(await call(guest)).data.profile;
+  const [renamed,voted]=await Promise.all([
+    rename(guest,'最终名字',current.revision),
+    call(guest,{action:'vote',room:room.id,nickname:'过期名字',candidateId:room.candidates[0].id}),
+  ]);
+  assert.equal(renamed.status,200);assert.equal(voted.status,200);
+  assert.equal((await call(guest,undefined,`?room=${room.id}`)).data.myVote.nickname,'最终名字');
+});
+
+test('upgrading a populated database preserves previous nicknames, orders, and history', async () => {
+  const legacy=createDatabase({migrationLimit:11});
+  try {
+    const now=new Date().toISOString();
+    legacy.sqlite.prepare('INSERT INTO visitor_preferences (owner,nickname) VALUES (?,?)').run('old-owner','原来的名字');
+    legacy.sqlite.prepare("INSERT INTO rooms (id,owner,title,status,created_at) VALUES (?,?,?,'open',?)").run('old-room','old-owner','旧饭局',now);
+    legacy.sqlite.prepare("INSERT INTO orders (id,room_id,owner,nickname,dish,quantity,note,status,created_at) VALUES (?,?,?,?,?,1,'','pending',?)").run('old-order','old-room','old-owner','原来的名字','原来的菜',now);
+    legacy.sqlite.prepare('INSERT INTO room_history (owner,room_id,created_at) VALUES (?,?,?)').run('old-guest','old-room',now);
+    const before=legacy.sqlite.prepare('SELECT * FROM orders').get();
+    legacy.sqlite.exec(readFileSync(new URL('../drizzle/0011_eager_william_stryker.sql',import.meta.url),'utf8'));
+    assert.deepEqual(legacy.sqlite.prepare('SELECT * FROM orders').get(),before);
+    assert.equal(legacy.sqlite.prepare('SELECT nickname,revision FROM visitor_preferences').get().revision,0);
+    assert.equal(legacy.sqlite.prepare('SELECT COUNT(*) n FROM room_history').get().n,1);
+    assert.deepEqual(legacy.sqlite.prepare('PRAGMA foreign_key_check').all(),[]);
+    legacy.sqlite.prepare("UPDATE visitor_preferences SET nickname='现在的名字',nickname_key='现在的名字',revision=1 WHERE owner='old-owner'").run();
+    assert.equal(legacy.sqlite.prepare('SELECT revision FROM orders').get().revision,1);
+    assert.equal(legacy.sqlite.prepare('SELECT nickname FROM orders').get().nickname,'原来的名字');
+  } finally { legacy.sqlite.close(); }
 });

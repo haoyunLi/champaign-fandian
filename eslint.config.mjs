@@ -6,7 +6,7 @@ const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
   {
-    files: ['app/**/*.{ts,tsx}', 'components/replay-button.tsx'],
+    files: ['src/app/**/*.{ts,tsx}', 'src/components/replay-button.tsx'],
     rules: {
       // Room navigation uses popstate plus a query-string room ID. Full navigation
       // from other pages deliberately remounts that controller and its identity.
@@ -25,7 +25,7 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
   ]),
   {
-    files: ["components/ui/**/*.{ts,tsx}", "hooks/use-mobile.ts"],
+    files: ["src/components/ui/**/*.{ts,tsx}", "src/hooks/use-mobile.ts"],
     rules: {
       // These files are vendored verbatim from shadcn@4.17.0. Keep the
       // registry source intact while applying the stricter rules to Site code.
