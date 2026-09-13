@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { gameFetch } from '@/lib/game-client';
 import { MAX_MENU_BYTES, MAX_MENU_IMAGES, MENU_TYPES, menuImageUrl } from '@/lib/restaurant-media';
+import { formatMealDateTime } from '@/lib/meal-date';
 import type { Catalog, Restaurant } from '@/lib/types';
 
 function MenuPicture({id, alt}: {id:string;alt:string}) {
@@ -15,18 +16,43 @@ function MenuPicture({id, alt}: {id:string;alt:string}) {
   return failed ? <div className="menu-load-error" role="alert"><p>这张菜单暂时无法加载。</p><Button type="button" variant="outline" onClick={()=>{setFailed(false);setAttempt(value=>value+1);}}>重新加载</Button></div>
     : <img src={`${menuImageUrl(id)}&retry=${attempt}`} alt={alt} onError={()=>setFailed(true)}/>;
 }
-export function RestaurantLinks({restaurant, onAddMenu, round = false, prominent = false}: {restaurant: Pick<Restaurant,'name'|'source'|'menu_images'>; onAddMenu?:()=>void; round?:boolean; prominent?:boolean}) {
-  const [page, setPage] = useState<number | null>(null);
-  const images = restaurant.menu_images || [];
-  const index = Math.min(page ?? 0, images.length-1);
+export type MenuMode='snapshot'|'latest';
+type MenuRestaurant=Pick<Restaurant,'id'|'name'|'source'|'menu_images'|'media_updated_at'>;
+export function MenuBrowser({restaurant,roomId,initialMode='snapshot',onAddMenu,onOrder}: {restaurant:MenuRestaurant;roomId?:string;initialMode?:MenuMode;onAddMenu?:()=>void;onOrder?:(mode:MenuMode)=>void}) {
+  const [mode,setMode]=useState<MenuMode>(initialMode),[page,setPage]=useState(0),[refresh,setRefresh]=useState(0);
+  const [latest,setLatest]=useState<Restaurant|null>(null),[loading,setLoading]=useState(initialMode==='latest'),[error,setError]=useState('');
+  useEffect(()=>{
+    if(mode!=='latest'||!roomId)return;
+    let cancelled=false;const controller=new AbortController();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- A menu version change starts a scoped request, not a render loop.
+    setLoading(true);setError('');setLatest(null);
+    void gameFetch(`/api/game?room=${encodeURIComponent(roomId)}&menu=${encodeURIComponent(restaurant.id)}`,{signal:controller.signal}).then(async response=>{
+      const value=await response.json() as {restaurant:Restaurant|null;message?:string;error?:string};
+      if(!response.ok)throw new Error(value.error||'暂时无法读取最新菜单。');
+      if(!cancelled){setLatest(value.restaurant);setError(value.message||'');}
+    }).catch(e=>{if(!cancelled)setError((e as Error).message);}).finally(()=>{if(!cancelled)setLoading(false);});
+    return ()=>{cancelled=true;controller.abort();};
+  },[mode,roomId,restaurant.id,refresh]);
+  const shown=mode==='latest'?latest:restaurant,images=shown?.menu_images||[],index=Math.min(page,Math.max(0,images.length-1));
+  return <div className="menu-browser">
+    {roomId&&<div className="menu-version-controls" role="group" aria-label="菜单版本"><Button type="button" variant="outline" aria-pressed={mode==='snapshot'} onClick={()=>{setMode('snapshot');setPage(0);}}>本轮原菜单</Button><Button type="button" variant="outline" aria-pressed={mode==='latest'} onClick={()=>{setMode('latest');setPage(0);setRefresh(n=>n+1);}}>查看最新菜单</Button></div>}
+    {mode==='latest'&&shown&&<p className="menu-version-note">当前餐馆：{shown.name}{shown.media_updated_at?` · 更新于 ${formatMealDateTime(shown.media_updated_at)}（香槟时间）`:' · 暂无更新时间记录'}。本轮原菜单不受影响。</p>}
+    {mode==='latest'&&loading?<p className="menu-loading" role="status"><Loader2 className="spin"/>正在读取最新菜单…</p>:mode==='latest'&&error?<p className="error" role="alert">{error}<Button type="button" variant="ghost" onClick={()=>setRefresh(n=>n+1)}>重新读取</Button></p>:images.length?<>
+      <div className="menu-pager"><Button type="button" variant="outline" size="icon" aria-label="上一张菜单" disabled={index<=0} onClick={()=>setPage(index-1)}><ChevronLeft/></Button><span aria-live="polite">第 {index+1} / {images.length} 张</span><Button type="button" variant="outline" size="icon" aria-label="下一张菜单" disabled={index>=images.length-1} onClick={()=>setPage(index+1)}><ChevronRight/></Button><a href={menuImageUrl(images[index])} target="_blank" rel="noopener noreferrer">打开原图<ExternalLink size={15}/></a></div>
+      <div className="menu-full-image"><MenuPicture key={images[index]} id={images[index]} alt={`${shown?.name||restaurant.name} 菜单第 ${index+1} 张`}/></div>
+    </>:<div className="menu-empty-state"><BookOpen size={36} aria-hidden="true"/><strong>暂无菜单图片</strong><p>{roomId&&mode==='snapshot'?'可以切换「查看最新菜单」，查看饭局发起后补充的图片。':'群友可以在餐馆清单中补充菜单图片。'}</p>{onAddMenu?<Button type="button" className="primary" onClick={onAddMenu}><Upload size={18}/>添加菜单图片</Button>:<a className="menu-catalog-link" href="/#restaurants">前往餐馆清单</a>}</div>}
+    {shown?.source&&<a className="menu-browser-website" href={shown.source} target="_blank" rel="noopener noreferrer">餐馆官网<ExternalLink size={16}/></a>}
+    {onOrder&&<Button type="button" className="primary full menu-order-button" onClick={()=>onOrder(mode)}>帮我带一份</Button>}
+  </div>;
+}
+export function RestaurantLinks({restaurant,onAddMenu,roomId,prominent=false,onOrder}: {restaurant:MenuRestaurant;onAddMenu?:()=>void;roomId?:string;prominent?:boolean;onOrder?:(mode:MenuMode)=>void}) {
+  const [open,setOpen]=useState(false),images=restaurant.menu_images||[];
   return <div className={`restaurant-links ${prominent?'restaurant-links-prominent':''}`}>
-    <Button type="button" variant="outline" className="menu-entry" aria-label={`查看 ${restaurant.name} 的菜单${images.length?`（${images.length} 张）`:'（暂无菜单）'}`} onClick={()=>setPage(0)}><BookOpen size={17}/>查看菜单{images.length>0&&<span className="menu-image-count">{images.length}</span>}</Button>
-    {!images.length&&<span className="menu-missing-label">暂无菜单</span>}
-    {restaurant.source && <a href={restaurant.source} target="_blank" rel="noopener noreferrer" aria-label={`${restaurant.name} 官网`}><ExternalLink size={15}/>官网</a>}
-    <Dialog open={page!==null} onOpenChange={open=>!open&&setPage(null)}><DialogContent className={`menu-viewer ${!images.length?'menu-viewer-empty':''}`}><DialogHeader><DialogTitle>{restaurant.name} · 菜单</DialogTitle><DialogDescription>{images.length?'由群友上传，菜品和价格以餐馆实际供应为准。':round?'本轮发起时还没有菜单图片。餐馆清单中可以查看或补充最新菜单。':'还没有人上传这家餐馆的菜单，补充后大家都能直接查看。'}</DialogDescription></DialogHeader>
-      {images.length>0?<><div className="menu-pager"><Button type="button" variant="outline" size="icon" aria-label="上一张菜单" disabled={index<=0} onClick={()=>setPage(index-1)}><ChevronLeft/></Button><span aria-live="polite">第 {index+1} / {images.length} 张</span><Button type="button" variant="outline" size="icon" aria-label="下一张菜单" disabled={index>=images.length-1} onClick={()=>setPage(index+1)}><ChevronRight/></Button><a href={menuImageUrl(images[index] || '')} target="_blank" rel="noopener noreferrer">打开原图<ExternalLink size={15}/></a></div>
-      <div className="menu-full-image"><MenuPicture key={images[index]} id={images[index] || ''} alt={`${restaurant.name} 菜单第 ${index+1} 张`}/></div>
-      </>:<div className="menu-empty-state"><BookOpen size={36} aria-hidden="true"/><strong>暂无菜单图片</strong>{restaurant.source&&<a className="menu-empty-website" href={restaurant.source} target="_blank" rel="noopener noreferrer">先去官网看看<ExternalLink size={16}/></a>}{onAddMenu?<Button type="button" className="primary" onClick={()=>{setPage(null);onAddMenu();}}><Upload size={18}/>添加菜单图片</Button>:<a className="menu-catalog-link" href="/#restaurants">前往餐馆清单</a>}</div>}
+    <Button type="button" variant="outline" className="menu-entry" aria-label={`查看 ${restaurant.name} 的菜单${images.length?`（${images.length} 张）`:'（暂无菜单）'}`} onClick={()=>setOpen(true)}><BookOpen size={17}/>查看菜单{images.length>0&&<span className="menu-image-count">{images.length}</span>}</Button>
+    {!images.length&&<span className="menu-missing-label">{roomId?'可查最新菜单':'暂无菜单'}</span>}
+    {restaurant.source&&<a href={restaurant.source} target="_blank" rel="noopener noreferrer" aria-label={`${restaurant.name} 官网`}><ExternalLink size={15}/>官网</a>}
+    <Dialog open={open} onOpenChange={setOpen}><DialogContent className="menu-viewer"><DialogHeader><DialogTitle>{restaurant.name} · 菜单</DialogTitle><DialogDescription>由群友上传，菜品和价格以餐馆实际供应为准。</DialogDescription></DialogHeader>
+      <MenuBrowser restaurant={restaurant} roomId={roomId} onAddMenu={onAddMenu?()=>{setOpen(false);onAddMenu();}:undefined} onOrder={onOrder?mode=>{setOpen(false);onOrder(mode);}:undefined}/>
     </DialogContent></Dialog>
   </div>;
 }

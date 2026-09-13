@@ -39,6 +39,11 @@ test('menus become shared only after saving; website and menu snapshots survive 
   const image=await view(other,id);assert.equal(image.status,200);assert.equal(image.headers.get('content-type'),'image/png');assert.equal(image.headers.get('x-content-type-options'),'nosniff');
   const room=(await call(other,{action:'create',title:'菜单快照',mode:'manual',requestId:randomUUID(),restaurantIds:catalog.restaurants.slice(0,2).map(r=>r.id)})).data;
   assert.deepEqual(room.candidates[0].menu_images,[id]);assert.equal(room.candidates[0].source,'https://restaurant.example/menu?a=1&b=2');
+  const newImage=(await upload(owner)).data.id;
+  await call(owner,save(r,{menu_images:[newImage]}));
+  const latest=(await call(other,null,`?room=${room.id}&menu=${room.candidates[0].id}`)).data;
+  assert.deepEqual(latest.restaurant.menu_images,[newImage]);
+  assert.deepEqual((await call(other,null,`?room=${room.id}`)).data.candidates[0].menu_images,[id]);
   assert.equal((await call(other,save(r,{source:'',menu_images:[]}))).status,200);
   await call(owner,{action:'deleteRestaurant',id:r.id});
   const reread=(await call(other,null,`?room=${room.id}`)).data;assert.deepEqual(reread.candidates[0].menu_images,[id]);assert.equal((await view(other,id)).status,200);

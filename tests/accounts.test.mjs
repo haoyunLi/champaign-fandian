@@ -31,12 +31,14 @@ test('guest nickname survives the real issued cookie, reloads, and creating anot
 });
 test('first sign-in adopts existing history and a second browser recovers the same identity',async()=>{
   const a=browser(),b=browser(),{room,body}=await savedGuest(a);
+  const pool=await request(a,{action:'savePool',name:'常吃的两家',restaurantIds:body.restaurantIds,requestId:randomUUID()});assert.equal(pool.status,200);
   await request(a,{action:'vote',room:room.id,nickname:'保留的小李',candidateId:room.candidates[0].id});
   const logged=await request(a,undefined,{user:'alice'});
   assert.equal(logged.data.profile.nickname,'保留的小李');assert.equal(logged.data.profile.account.signed_in,true);
   const elsewhere=await request(b,undefined,{user:'alice'});
   assert.equal(elsewhere.data.profile.nickname,'保留的小李');assert.equal(elsewhere.view,logged.view);
   assert.equal(elsewhere.data.activeRooms[0].isHost,true);
+  assert.deepEqual(elsewhere.data.pools,logged.data.pools);assert.equal(elsewhere.data.pools[0].name,'常吃的两家');
   const page=await request(b,undefined,{user:'alice',query:`?room=${room.id}`});
   assert.equal(page.data.myVote.nickname,'保留的小李');assert.equal(page.data.isHost,true);
   assert.equal(page.data.profile.sign_in_path,`/signin-with-chatgpt?return_to=${encodeURIComponent('/?room='+room.id)}`);

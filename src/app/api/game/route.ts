@@ -5,7 +5,7 @@ import { MenuError, menuIds, restaurantWebsite, restaurantWithMedia } from '@/li
 import { seeds } from '@/lib/seeds';
 import { PayloadTooLargeError, readRequestText } from '@/lib/request-body';
 import { ACTIVE_DELIVERY_SQL, finishMeal, mealLifecycle, settleMeals, type LifecycleRow } from '@/lib/meal-lifecycle';
-import type { Restaurant, Room, Vote, FoodOrder, HistoryRoom, HistoryPage, HomeMeal, VotingMode, Profile, Member, AccountSession } from '@/lib/types';
+import type { Restaurant, Room, Vote, FoodOrder, HistoryRoom, HistoryPage, HomeMeal, VotingMode, Profile, Member, AccountSession, PickupPlan, RestaurantPool } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 class UserError extends Error { constructor(message: string, public status = 400, public code?: string, public room?: Room) { super(message); } }
@@ -86,7 +86,7 @@ async function catalog(db: D1Database, owner: string) {
     (SELECT COUNT(*) FROM orders WHERE room_id=r.id AND status='delivered') AS delivered_count`;
   const [,,restaurants,rooms,active,total,finished] = await db.batch([
     ...settleMeals(db,'owner=? OR id IN (SELECT room_id FROM room_history WHERE owner=?)',[owner,owner]),
-    db.prepare('SELECT id,name,cuisine,address,source,menu_images,selected,position FROM restaurants WHERE owner=? AND deleted=0 ORDER BY position,id').bind('shared'),
+    db.prepare('SELECT id,name,cuisine,address,source,menu_images,media_updated_at,selected,position FROM restaurants WHERE owner=? AND deleted=0 ORDER BY position,id').bind('shared'),
     db.prepare('SELECT id,title,status,mode,created_at,decided_at,completed_at,completion_reason FROM rooms WHERE owner=? AND deleted_at IS NULL ORDER BY created_at DESC,id DESC LIMIT 8').bind(owner),
     db.prepare(`${summarySelect} ${activeFrom} ORDER BY r.created_at DESC,r.id DESC LIMIT 8`).bind(owner,owner,owner),
     db.prepare(`SELECT COUNT(*) AS count ${activeFrom}`).bind(owner,owner),
@@ -95,7 +95,8 @@ async function catalog(db: D1Database, owner: string) {
       AND EXISTS (SELECT 1 FROM orders WHERE room_id=r.id)
       ORDER BY r.completed_at DESC,r.id DESC LIMIT 4`).bind(owner,owner,owner),
   ]);
-  return { profile:await profile(db,owner),restaurants:(restaurants.results as RestaurantRow[]).map(restaurantWithMedia),
+  const pools=(await db.prepare('SELECT id,name,restaurant_ids,revision FROM restaurant_pools WHERE owner=? AND deleted_at IS NULL ORDER BY created_at,id').bind(owner).all<Omit<RestaurantPool,'restaurant_ids'> & {restaurant_ids:string}>()).results.map(p=>({...p,restaurant_ids:JSON.parse(p.restaurant_ids) as string[]}));
+  return { pools,profile:await profile(db,owner),restaurants:(restaurants.results as RestaurantRow[]).map(restaurantWithMedia),
     rooms:(rooms.results as (LifecycleRow & {id:string;title:string;mode:VotingMode})[]).map(row=>({...row,...mealLifecycle(row)})),
     activeRooms:(active.results as HomeMeal[]).map(row=>({...row,...mealLifecycle(row),isHost:!!row.isHost})),
     recentFinishedRooms:(finished.results as HomeMeal[]).map(row=>({...row,...mealLifecycle(row),isHost:!!row.isHost})),
@@ -152,13 +153,13 @@ async function historyPage(db: D1Database, owner: string, url: URL): Promise<His
   return { profile:await profile(db,owner),rooms, nextCursor: rows.length > 20 && last ? JSON.stringify({createdAt:last.created_at,id:last.id}) : null };
 }
 async function roomState(db: D1Database, id: string, owner: string): Promise<Room> {
-  const [,,roomRows,candidates,votes,myVote,orders,history,preferences,people] = await db.batch([
+  const [,,roomRows,candidates,votes,myVote,orders,history,preferences,people,pickup] = await db.batch([
     ...settleMeals(db,'id=?',[id]),
     db.prepare("SELECT *,COALESCE((SELECT nickname FROM visitor_preferences WHERE owner=rooms.owner),'未设置昵称') AS creator_name FROM rooms WHERE id=? AND deleted_at IS NULL").bind(id),
-    db.prepare('SELECT c.id,c.name,c.cuisine,c.address,c.source,c.menu_images,c.position,COUNT(v.id) AS count FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id AND v.room_id=c.room_id WHERE c.room_id=? GROUP BY c.id ORDER BY c.position').bind(id),
+    db.prepare('SELECT c.id,c.name,c.cuisine,c.address,c.source,c.menu_images,c.restaurant_id,c.position,COUNT(v.id) AS count FROM candidates c LEFT JOIN votes v ON v.candidate_id=c.id AND v.room_id=c.room_id WHERE c.room_id=? GROUP BY c.id ORDER BY c.position').bind(id),
     db.prepare('SELECT COALESCE(p.nickname,v.nickname) AS nickname,candidate_id,created_at FROM votes v LEFT JOIN visitor_preferences p ON p.owner=v.voter WHERE room_id=? ORDER BY created_at DESC').bind(id),
     db.prepare('SELECT COALESCE(p.nickname,v.nickname) AS nickname,candidate_id,created_at FROM votes v LEFT JOIN visitor_preferences p ON p.owner=v.voter WHERE room_id=? AND voter=?').bind(id,owner),
-    db.prepare('SELECT o.*,COALESCE(p.nickname,o.nickname) AS display_nickname,COALESCE(c.nickname,o.claimant_name) AS display_claimant FROM orders o LEFT JOIN visitor_preferences p ON p.owner=o.owner LEFT JOIN visitor_preferences c ON c.owner=o.claimant WHERE room_id=? ORDER BY created_at,id').bind(id),
+    db.prepare(`SELECT o.*,COALESCE(p.nickname,o.nickname) AS display_nickname,COALESCE(c.nickname,o.claimant_name) AS display_claimant,COALESCE(pp.time,'') AS pickup_time,COALESCE(pp.place,'') AS pickup_place FROM orders o LEFT JOIN visitor_preferences p ON p.owner=o.owner LEFT JOIN visitor_preferences c ON c.owner=o.claimant LEFT JOIN pickup_plans pp ON pp.room_id=o.room_id AND pp.owner=o.claimant WHERE o.room_id=? ORDER BY o.created_at,o.id`).bind(id),
     db.prepare('SELECT hidden_at FROM room_history WHERE owner=? AND room_id=?').bind(owner,id),
     db.prepare('SELECT nickname,revision FROM visitor_preferences WHERE owner=?').bind(owner),
     db.prepare(`WITH people AS (
@@ -174,12 +175,21 @@ async function roomState(db: D1Database, id: string, owner: string): Promise<Roo
       (SELECT COUNT(*) FROM orders WHERE room_id=? AND claimant=people.owner AND status='delivered') AS delivered
       FROM people LEFT JOIN visitor_preferences p ON p.owner=people.owner ORDER BY isHost DESC,nickname,people.owner`)
       .bind(id,id,id,id,id,id,id,owner,id,id,id,id,id),
+    db.prepare('SELECT time,place,revision FROM pickup_plans WHERE room_id=? AND owner=?').bind(id,owner),
   ]);
   const room=roomRows.results[0] as (LifecycleRow & {id:string;title:string;status:string;mode:VotingMode;winner_id:string|null;created_at:string;revision:number;owner:string;orders_stopped_at:string|null;creator_name:string})|undefined;
   if (!room) throw new UserError('这轮投票不存在或已被发起人删除。发起人可在历史记录的回收站中恢复。',404);
   const personalHistory=history.results[0] as {hidden_at:string|null}|undefined;
   const participated=myVote.results.length>0 || (orders.results as {owner:string;claimant:string|null}[]).some(o=>o.owner===owner||o.claimant===owner);
-  return { ...mealLifecycle(room),profile:(preferences.results[0] as Profile|undefined)||{nickname:'',revision:0},creator_name:room.creator_name,members:(people.results as Member[]).map(p=>({...p,isMe:!!p.isMe,isHost:!!p.isHost,hasVoted:!!p.hasVoted})),orders_stopped_at:room.orders_stopped_at,canStopOrders:room.owner===owner || (orders.results as {status:string;claimant:string|null}[]).some(o=>o.status==='claimed'&&o.claimant===owner),preferred_nickname:String((preferences.results[0] as {nickname:string}|undefined)?.nickname || ''),id:room.id,title:room.title,status:room.status,mode:room.mode,winner_id:room.winner_id,created_at:room.created_at,revision:room.revision,isHost:room.owner===owner,inHistory:room.owner===owner || (personalHistory ? personalHistory.hidden_at===null : participated),candidates:(candidates.results as RestaurantRow[]).map(restaurantWithMedia),votes:votes.results as Vote[],myVote:myVote.results[0] as Vote||null,total:votes.results.length,orders:(orders.results as (FoodOrder & {owner:string;claimant:string|null;display_nickname:string;display_claimant:string|null})[]).map(o=>({id:o.id,nickname:o.display_nickname,dish:o.dish,quantity:o.quantity,note:o.note,status:o.status,revision:o.revision,isCarrier:o.claimant===owner,claimant_name:o.display_claimant,created_at:o.created_at,isMine:o.owner===owner,canManage:o.claimant===owner||room.owner===owner})) };
+  return { myPickupPlan:(pickup.results[0] as PickupPlan|undefined)||{time:'',place:'',revision:0},canEditPickupPlan:(orders.results as {claimant:string;status:string}[]).some(o=>o.claimant===owner&&o.status==='claimed'),...mealLifecycle(room),profile:(preferences.results[0] as Profile|undefined)||{nickname:'',revision:0},creator_name:room.creator_name,members:(people.results as Member[]).map(p=>({...p,isMe:!!p.isMe,isHost:!!p.isHost,hasVoted:!!p.hasVoted})),orders_stopped_at:room.orders_stopped_at,canStopOrders:room.owner===owner || (orders.results as {status:string;claimant:string|null}[]).some(o=>o.status==='claimed'&&o.claimant===owner),preferred_nickname:String((preferences.results[0] as {nickname:string}|undefined)?.nickname || ''),id:room.id,title:room.title,status:room.status,mode:room.mode,winner_id:room.winner_id,created_at:room.created_at,revision:room.revision,isHost:room.owner===owner,inHistory:room.owner===owner || (personalHistory ? personalHistory.hidden_at===null : participated),candidates:(candidates.results as RestaurantRow[]).map(restaurantWithMedia),votes:votes.results as Vote[],myVote:myVote.results[0] as Vote||null,total:votes.results.length,orders:(orders.results as (FoodOrder & {owner:string;claimant:string|null;display_nickname:string;display_claimant:string|null})[]).map(o=>({id:o.id,pickup_time:o.pickup_time,pickup_place:o.pickup_place,nickname:o.display_nickname,dish:o.dish,quantity:o.quantity,note:o.note,status:o.status,revision:o.revision,isCarrier:o.claimant===owner,claimant_name:o.display_claimant,created_at:o.created_at,isMine:o.owner===owner,canManage:o.claimant===owner||room.owner===owner})) };
+}
+async function latestMenu(db:D1Database,room:Room,candidateId:string) {
+  const candidate=room.candidates.find(c=>c.id===candidateId);
+  if(!candidate) throw new UserError('这家餐馆不在本轮候选中。',404);
+  let rows:RestaurantRow[];
+  if(candidate.restaurant_id) rows=(await db.prepare("SELECT id,name,cuisine,address,source,menu_images,media_updated_at,selected,position FROM restaurants WHERE id=? AND owner='shared' AND deleted=0").bind(candidate.restaurant_id).all<RestaurantRow>()).results;
+  else rows=(await db.prepare("SELECT id,name,cuisine,address,source,menu_images,media_updated_at,selected,position FROM restaurants WHERE owner='shared' AND deleted=0 AND name=? AND cuisine=? AND address=? LIMIT 2").bind(candidate.name,candidate.cuisine,candidate.address).all<RestaurantRow>()).results;
+  return rows.length===1?{restaurant:restaurantWithMedia(rows[0])}:{restaurant:null,message:candidate.restaurant_id?'这家餐馆已从餐馆库移除，本轮原菜单仍可查看。':'无法准确对应到当前餐馆，请到餐馆清单中查看最新菜单。本轮原菜单仍保留。'};
 }
 async function handle(request: Request) {
   let cookie: string | null = null;
@@ -198,7 +208,7 @@ async function handle(request: Request) {
     let result: unknown;
     if (request.method === 'GET') {
       const room=url.searchParams.get('room');
-      result=url.searchParams.has('profile') ? await profile(db,owner) : room ? await roomState(db,clean(room,64,'投票编号'),owner) : url.searchParams.has('history') ? await historyPage(db,owner,url) : await catalog(db,owner);
+      result=url.searchParams.has('profile') ? await profile(db,owner) : room ? url.searchParams.has('menu') ? await latestMenu(db,await roomState(db,clean(room,64,'投票编号'),owner),clean(url.searchParams.get('menu'),80,'候选编号')) : await roomState(db,clean(room,64,'投票编号'),owner) : url.searchParams.has('history') ? await historyPage(db,owner,url) : await catalog(db,owner);
     } else {
       const expectedIdentity=request.headers.get('x-fandian-identity');
       if((expectedIdentity&&expectedIdentity!==viewKey)||(!expectedIdentity&&identityResult.account.signed_in))
@@ -210,6 +220,55 @@ async function handle(request: Request) {
       if (!body || typeof body!=='object' || Array.isArray(body)) throw new UserError('提交内容无效。');
       if (body.action==='saveProfile') {
         result=await saveProfile(db,owner,body);
+      } else if (body.action==='savePool') {
+        const name=clean(body.name,40,'餐馆池名称');
+        if(!Array.isArray(body.restaurantIds)||body.restaurantIds.length<2||body.restaurantIds.length>100) throw new UserError('餐馆池请选择 2–100 家餐馆。');
+        const ids=[...new Set(body.restaurantIds.map(id=>clean(id,80,'餐馆编号')))].sort();
+        if(ids.length<2) throw new UserError('请选择至少两家不同的餐馆。');
+        const json=JSON.stringify(ids),fingerprint=await hashText(JSON.stringify({name,ids}));
+        const now=new Date().toISOString();
+        const valid=`(SELECT COUNT(*) FROM restaurants WHERE owner='shared' AND deleted=0 AND id IN (SELECT value FROM json_each(?)))=?`;
+        if(body.id) {
+          if(!Number.isInteger(body.expectedRevision)) throw new UserError('请刷新后修改餐馆池。',409);
+          const id=clean(body.id,64,'餐馆池编号');
+          const current=await db.prepare('SELECT name,restaurant_ids,revision FROM restaurant_pools WHERE id=? AND owner=? AND deleted_at IS NULL').bind(id,owner).first<{name:string;restaurant_ids:string;revision:number}>();
+          if(!current) throw new UserError('餐馆池不存在。',404);
+          if(current.name!==name||current.restaurant_ids!==json) {
+            const changed=await db.prepare(`UPDATE restaurant_pools SET name=?,restaurant_ids=?,revision=revision+1 WHERE id=? AND owner=? AND deleted_at IS NULL AND revision=? AND ${valid}`).bind(name,json,id,owner,body.expectedRevision,json,ids.length).run();
+            if(!changed.meta.changes) throw new UserError('餐馆池或餐馆清单已变化，请刷新后重新选择。',409);
+          }
+        } else {
+          const requestId=clean(body.requestId,36,'请求编号');if(!/^[a-f0-9-]{36}$/.test(requestId)) throw new UserError('请求编号无效。');
+          const id=(await hashText(`pool:${owner}:${requestId}`)).slice(0,32);
+          await db.prepare(`INSERT OR IGNORE INTO restaurant_pools (id,owner,name,restaurant_ids,creation_hash,created_at) SELECT ?,?,?,?,?,?
+            WHERE (SELECT COUNT(*) FROM restaurant_pools WHERE owner=? AND deleted_at IS NULL)<20 AND ${valid}`).bind(id,owner,name,json,fingerprint,now,owner,json,ids.length).run();
+          const saved=await db.prepare('SELECT creation_hash,deleted_at FROM restaurant_pools WHERE id=? AND owner=?').bind(id,owner).first<{creation_hash:string;deleted_at:string|null}>();
+          if(!saved) throw new UserError('最多保存 20 个餐馆池，或所选餐馆刚被删除。请刷新后重试。',409);
+          if(saved.deleted_at||saved.creation_hash!==fingerprint) throw new UserError('这次请求已保存或删除过，请刷新查看餐馆池。',409);
+        }
+        result=await catalog(db,owner);
+      } else if (body.action==='deletePool') {
+        const changed=await db.prepare('UPDATE restaurant_pools SET deleted_at=?,revision=revision+1 WHERE id=? AND owner=? AND revision=? AND deleted_at IS NULL').bind(new Date().toISOString(),clean(body.id,64,'餐馆池编号'),owner,Number.isInteger(body.expectedRevision)?body.expectedRevision:-1).run();
+        if(!changed.meta.changes) throw new UserError('餐馆池已变化，请刷新后重试。',409);
+        result=await catalog(db,owner);
+      } else if (body.action==='savePickupPlan') {
+        const id=clean(body.room,64,'饭局编号'),room=await roomState(db,id,owner);
+        if(room.phase!=='delivery') throw new UserError('当前不能修改取餐安排。',409);
+        if(!room.canEditPickupPlan) throw new UserError('请先认领带饭，再填写自己的取餐安排。',403);
+        const time=clean(body.time,60,'预计带回时间',false),place=clean(body.place,120,'取餐地点',false);
+        if(!Number.isInteger(body.expectedRevision)||Number(body.expectedRevision)<0) throw new UserError('请刷新后修改取餐安排。',409);
+        if(room.myPickupPlan.time!==time||room.myPickupPlan.place!==place) {
+          const [changed]=await db.batch([
+            db.prepare(`INSERT INTO pickup_plans (room_id,owner,time,place,revision) SELECT ?,?,?,?,1 WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND ${ACTIVE_DELIVERY_SQL})
+              AND EXISTS (SELECT 1 FROM orders WHERE room_id=? AND claimant=? AND status='claimed')
+              AND (?=0 OR EXISTS(SELECT 1 FROM pickup_plans WHERE room_id=? AND owner=?))
+              ON CONFLICT(room_id,owner) DO UPDATE SET time=excluded.time,place=excluded.place,revision=pickup_plans.revision+1 WHERE pickup_plans.revision=?`)
+              .bind(id,owner,time,place,id,id,owner,body.expectedRevision,id,owner,body.expectedRevision),
+            db.prepare('UPDATE rooms SET revision=revision+1 WHERE id=? AND changes()>0').bind(id),
+          ]);
+          if(!changed.meta.changes) throw new UserError('取餐安排或认领状态已变化，请查看最新内容。',409,'PICKUP_CHANGED',await roomState(db,id,owner));
+        }
+        result=await roomState(db,id,owner);
       } else if (body.action==='saveHistory') {
         const id=clean(body.room,64,'投票编号');
         const room=await roomState(db,id,owner);
@@ -254,11 +313,11 @@ async function handle(request: Request) {
         const validImages=`NOT EXISTS (SELECT 1 FROM json_each(?) j LEFT JOIN menu_images m ON m.id=j.value
           WHERE m.id IS NULL OR m.ready<>1 OR (m.published=0 AND m.owner<>?))`;
         const mutation=body.id
-          ? db.prepare(`UPDATE restaurants SET name=?,cuisine=?,address=?,source=?,menu_images=?
-              WHERE id=? AND owner='shared' AND deleted=0 AND ${validImages}`).bind(name,cuisine,address,source,images,id,images,owner)
-          : db.prepare(`INSERT INTO restaurants (id,owner,name,cuisine,address,source,menu_images,selected,position)
-              SELECT ?,'shared',?,?,?,?,?,1,? WHERE (SELECT COUNT(*) FROM restaurants WHERE owner='shared' AND deleted=0)<100
-              AND ${validImages}`).bind(id,name,cuisine,address,source,images,Date.now(),images,owner);
+          ? db.prepare(`UPDATE restaurants SET name=?,cuisine=?,address=?,media_updated_at=CASE WHEN source<>? OR menu_images<>? THEN ? ELSE media_updated_at END,source=?,menu_images=?
+              WHERE id=? AND owner='shared' AND deleted=0 AND ${validImages}`).bind(name,cuisine,address,source,images,new Date().toISOString(),source,images,id,images,owner)
+          : db.prepare(`INSERT INTO restaurants (id,owner,name,cuisine,address,source,menu_images,media_updated_at,selected,position)
+              SELECT ?,'shared',?,?,?,?,?,?,1,? WHERE (SELECT COUNT(*) FROM restaurants WHERE owner='shared' AND deleted=0)<100
+              AND ${validImages}`).bind(id,name,cuisine,address,source,images,new Date().toISOString(),Date.now(),images,owner);
         const [changed]=await db.batch([
           mutation,
           db.prepare(`UPDATE menu_images SET published=1 WHERE id IN
@@ -296,9 +355,9 @@ async function handle(request: Request) {
           // The room and its complete candidate snapshot commit together. Retry IDs are stable.
           await db.batch([
             db.prepare("INSERT OR IGNORE INTO rooms (id,owner,title,status,created_at,mode,creation_request_hash) VALUES (?,?,?,'open',?,?,?)").bind(id,owner,title,new Date().toISOString(),mode,requestHash),
-            ...rows.map((r,i)=>db.prepare(`INSERT OR IGNORE INTO candidates (id,room_id,name,cuisine,address,source,menu_images,position)
-              SELECT ?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND owner=? AND creation_request_hash=?)`)
-              .bind(`${id}-${i+1}`,id,r.name,r.cuisine,r.address,r.source,r.menu_images,i+1,id,owner,requestHash)),
+            ...rows.map((r,i)=>db.prepare(`INSERT OR IGNORE INTO candidates (id,room_id,name,cuisine,address,source,menu_images,restaurant_id,position)
+              SELECT ?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM rooms WHERE id=? AND owner=? AND creation_request_hash=?)`)
+              .bind(`${id}-${i+1}`,id,r.name,r.cuisine,r.address,r.source,r.menu_images,r.id,i+1,id,owner,requestHash)),
           ]);
         }
         const saved=existing || await db.prepare('SELECT creation_request_hash FROM rooms WHERE id=? AND owner=?').bind(id,owner).first<{creation_request_hash:string|null}>();
@@ -316,8 +375,8 @@ async function handle(request: Request) {
           await db.batch([
             db.prepare(`INSERT OR IGNORE INTO rooms (id,owner,title,status,created_at,mode)
               SELECT ?,?,title,'open',?,mode FROM rooms WHERE id=? AND deleted_at IS NULL`).bind(id,owner,new Date().toISOString(),sourceId),
-            db.prepare(`INSERT OR IGNORE INTO candidates (id,room_id,name,cuisine,address,source,menu_images,position)
-              SELECT ? || '-' || c.position,?,c.name,c.cuisine,c.address,c.source,c.menu_images,c.position FROM candidates c
+            db.prepare(`INSERT OR IGNORE INTO candidates (id,room_id,name,cuisine,address,source,menu_images,restaurant_id,position)
+              SELECT ? || '-' || c.position,?,c.name,c.cuisine,c.address,c.source,c.menu_images,c.restaurant_id,c.position FROM candidates c
               JOIN rooms original ON original.id=c.room_id
               WHERE c.room_id=? AND original.deleted_at IS NULL AND EXISTS (SELECT 1 FROM rooms WHERE id=? AND owner=?)`).bind(id,id,sourceId,id,owner),
           ]);

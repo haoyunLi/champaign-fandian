@@ -1,17 +1,23 @@
 'use client';
 import { gameFetch } from '@/lib/game-client';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { Check, Copy, HandHeart, Loader2, LockKeyhole, Pencil, Plus, ShoppingBag, Undo2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { MenuBrowser, type MenuMode } from '@/components/restaurant-media';
+import { PickupPlanEditor } from '@/components/pickup-plan';
+import { parseOrderDraft } from '@/lib/order-draft';
 import type { FoodOrder, Room } from '@/lib/types';
 import { deadlineLabel, useMealPhase } from '@/components/meal-status';
 
 type Filter='all'|'pending'|'carrying'|'mine';
 type OrderAttempt={orderId:string;nickname:string;dish:string;quantity:number;note:string};
-export function FoodOrders({ room, update }: { room: Room; update: (r: Room) => void }) {
+export type FoodOrdersHandle={openNew:(mode?:MenuMode)=>void};
+export function FoodOrders({ room, update,ref }: { room: Room; update: (r: Room) => void;ref?:React.Ref<FoodOrdersHandle> }) {
+  const [menuMode,setMenuMode]=useState<MenuMode>('snapshot');
+  const draftKey=`fd_pending_draft_${room.id}`;
   const [editor,setEditor]=useState<FoodOrder|'new'|null>(null);
   const [claim,setClaim]=useState<FoodOrder|null>(null), [cancel,setCancel]=useState<FoodOrder|null>(null), [delivery,setDelivery]=useState<FoodOrder|null>(null);
   const [stopConfirm,setStopConfirm]=useState(false);
@@ -57,13 +63,16 @@ export function FoodOrders({ room, update }: { room: Room; update: (r: Room) => 
   const currentCancel=cancel ? room.orders.find(o=>o.id===cancel.id) : undefined;
   const cancelChanged=!!cancel && (!currentCancel || currentCancel.status!=='pending' || currentCancel.revision!==cancel.revision);
   const lastDelivery=!!delivery && unfinished.length===1 && unfinished[0].id===delivery.id;
-  useEffect(()=>{if(editor==='new'&&room.orders.some(o=>o.id===orderId.current&&o.isMine)){clearOrderAttempt();setEditor(null);setFilter('mine');}},[editor,room.orders,clearOrderAttempt]);
-  function openEditor(value:FoodOrder|'new') {
+  useEffect(()=>{if(editor==='new'&&room.orders.some(o=>o.id===orderId.current&&o.isMine)){clearOrderAttempt();try{sessionStorage.removeItem(`fd_pending_draft_${room.id}`);}catch{}setEditor(null);setFilter('mine');}},[editor,room.id,room.orders,clearOrderAttempt]);
+  function openEditor(value:FoodOrder|'new',mode?:MenuMode) {
     if(value==='new'&&(stopped||finished))return;
-    setError(''); setEditor(value);
-    if(value==='new'){if(orderAttempt.current){restoreOrderDraft(orderAttempt.current);return;}if(!nickname)setNickname(room.preferred_nickname||room.myVote?.nickname||'');orderId.current=crypto.randomUUID();setDish('');setQuantity('1');setNote('');}
+    setError(''); setEditor(value);if(mode)setMenuMode(mode);
+    if(value==='new'){if(orderAttempt.current){restoreOrderDraft(orderAttempt.current);return;}let draft=null;try{draft=parseOrderDraft(sessionStorage.getItem(draftKey));}catch{}if(draft){orderId.current=draft.orderId;setNickname(draft.nickname);setDish(draft.dish);setQuantity(draft.quantity);setNote(draft.note);return;}if(!nickname)setNickname(room.preferred_nickname||room.myVote?.nickname||'');orderId.current=crypto.randomUUID();setDish('');setQuantity('1');setNote('');}
     else {setDish(value.dish);setQuantity(String(value.quantity));setNote(value.note);}
   }
+  useImperativeHandle(ref,()=>({openNew:(mode)=>openEditor('new',mode)}));
+  useEffect(()=>{if(editor==='new'&&!pendingOrder&&orderId.current){try{sessionStorage.setItem(draftKey,JSON.stringify({orderId:orderId.current,nickname,dish,quantity,note}));}catch{}}},[editor,pendingOrder,draftKey,nickname,dish,quantity,note]);
+  function clearDraft(){try{sessionStorage.removeItem(draftKey);}catch{}}
   async function act(payload:Record<string,unknown>) {
     if(busyRef.current || finished) return false;
     busyRef.current=true;setBusy(true);setError('');
@@ -84,7 +93,7 @@ export function FoodOrders({ room, update }: { room: Room; update: (r: Room) => 
     finally{busyRef.current=false;setBusy(false);}
   }
   async function copyOrders() {
-    const text=[`${room.title} · 我来带`, `餐馆：${winner?.name || '已确定'}`, ...carrying.map((o,i)=>`${i+1}. ${o.nickname}：${o.dish} × ${o.quantity}\n   备注：${o.note || '无'}\n   状态：${o.status==='delivered'?'已带回':'已认领，待带回'}`), `共 ${carrying.length} 条 / ${carrying.reduce((n,o)=>n+o.quantity,0)} 份`].join('\n');
+    const text=[`${room.title} · 我来带`, `餐馆：${winner?.name || '已确定'}`, ...carrying.map((o,i)=>`${i+1}. ${o.nickname}：${o.dish} × ${o.quantity}\n   备注：${o.note || '无'}\n   取餐：${o.pickup_time||'时间待确认'}（香槟时间） · ${o.pickup_place||'地点待确认'}\n   状态：${o.status==='delivered'?'已带回':'已认领，待带回'}`), `共 ${carrying.length} 条 / ${carrying.reduce((n,o)=>n+o.quantity,0)} 份`].join('\n');
     try{await navigator.clipboard.writeText(text);setCopied(true);}
     catch{setCopyText(text);setCopied(false);}
   }
@@ -93,16 +102,17 @@ export function FoodOrders({ room, update }: { room: Room; update: (r: Room) => 
     <div className="section-heading"><div><h2><ShoppingBag/>带饭清单</h2><p>{room.orders.length} 条登记 · {room.orders.reduce((n,o)=>n+o.quantity,0)} 份 · {delivered} 条已带回</p></div>{!finished&&!stopped&&<Button className="primary order-cta" disabled={busy} onClick={()=>openEditor('new')}><Plus/>帮我带一份</Button>}</div>
     <div className={`meal-progress ${finished?'meal-finished':''}`} role="status"><strong>{finished ? room.completion_reason==='delivered'?'全部带饭已带回，本轮结束':'确定餐馆已满 12 小时，本轮自动结束' : `带饭进行中 · ${counts.pending} 条待认领`}</strong><p>{finished?'结果和清单已保留，未完成的登记保持原状态。':`全部带回后结束；否则将在 ${deadlineLabel(room.delivery_deadline_at)} 自动结束（确定餐馆起 12 小时）。`}</p></div>
     {!finished&&<div className={`order-intake ${stopped?'intake-stopped':''}`} role="status"><div><strong>{stopped?'已停止加单':'还可以登记带饭'}</strong><p>{stopped?`停止于 ${deadlineLabel(room.orders_stopped_at)}。已有登记仍可修改、认领和带回。`:'开始下单后，发起人或已认领带饭的人可以停止接收新登记。'}</p></div>{!stopped&&room.canStopOrders&&<Button className="secondary" variant="outline" disabled={busy} onClick={()=>{setError('');setStopConfirm(true);}}><LockKeyhole size={16}/>停止加单</Button>}</div>}
+    {!finished&&room.canEditPickupPlan&&<PickupPlanEditor room={room} busy={busy} save={act} error={error}/>}
     <div className="order-toolbar"><div className="order-filters" role="group" aria-label="带饭清单筛选">{([['all','全部'],['pending','待认领'],['carrying','我来带'],['mine','我的登记']] as [Filter,string][]).map(([value,label])=><Button key={value} variant="ghost" aria-pressed={filter===value} onClick={()=>{setFilter(value);setCopied(false);}}>{label}<span>{counts[value]}</span></Button>)}</div><Button className="copy-orders" variant="outline" disabled={!carrying.length} onClick={()=>void copyOrders()}><Copy/>{copied?'已复制我的清单':'复制我来带的清单'}</Button></div>
     {!visible.length ? <div className="orders-empty"><HandHeart/><div><strong>{emptyText[filter]}</strong><p>{filter==='carrying'?'在「待认领」里选择你可以帮忙带的菜。':filter==='mine'&&!finished?(stopped?'本轮已停止接收新登记。':'点击「帮我带一份」填写菜名和备注。'):filter==='pending'&&room.orders.length?'可以切换到「全部」查看认领和带回情况。':finished?'投票结果仍可查看。':stopped?'本轮已停止接收新登记。':'去不了的朋友可以登记，去的朋友可以认领。'}</p></div></div> : <div className="orders-list">{visible.map(o=><article className={`order-row order-${o.status}`} key={o.id}>
-      <div className="order-main"><div className="order-title"><strong>{o.dish}</strong><span>× {o.quantity}</span></div><p><b>{o.nickname}</b> 想吃{o.isMine&&<span className="mine-label">我的登记</span>}</p>{o.note&&<p className="order-note">{o.note}</p>}</div>
+      <div className="order-main"><div className="order-title"><strong>{o.dish}</strong><span>× {o.quantity}</span></div><p><b>{o.nickname}</b> 想吃{o.isMine&&<span className="mine-label">我的登记</span>}</p>{o.note&&<p className="order-note">{o.note}</p>}{o.status!=='pending'&&<p className="order-pickup">{o.pickup_time?`预计 ${o.pickup_time}（香槟时间）`:'带回时间待确认'} · {o.pickup_place||'取餐地点待确认'}</p>}</div>
       <div className="order-actions"><span className={`order-status ${o.status}`}>{o.status==='pending'?(finished?'未认领（本轮已结束）':'等人带饭'):o.status==='claimed'?`${o.claimant_name} 来带${finished?'（尚未标记带回）':''}`:`${o.claimant_name} 已带回`}</span>
         {!finished&&<div className="order-buttons">{o.status==='pending'&&<Button className="secondary" variant="outline" disabled={busy} onClick={()=>{setError('');if(!carrier)setCarrier(room.preferred_nickname||room.myVote?.nickname||'');setClaim(o);}}><HandHeart/>我来带</Button>}{o.status==='pending'&&o.isMine&&<><Button variant="ghost" disabled={busy} aria-label={`编辑 ${o.dish}`} onClick={()=>openEditor(o)}><Pencil/>编辑</Button><Button size="icon" variant="ghost" aria-label={`取消 ${o.dish}`} disabled={busy} onClick={()=>{setError('');setCancel(o);}}><X/></Button></>}{o.status==='claimed'&&o.canManage&&<><Button className="secondary" variant="outline" disabled={busy} onClick={()=>{setError('');if(unfinished.length===1)setDelivery(o);else void act({action:'deliver',orderId:o.id,expectedRevision:o.revision});}}><Check/>已带回</Button><Button size="icon" variant="ghost" aria-label={`取消认领 ${o.dish}`} disabled={busy} onClick={()=>void act({action:'release',orderId:o.id,expectedRevision:o.revision})}><Undo2/></Button></>}</div>}
       </div>
     </article>)}</div>}
     {error&&!editor&&!claim&&!cancel&&!delivery&&<p className="error" role="alert">{error}</p>}
-    <Dialog open={!!editor} onOpenChange={open=>!open&&!busy&&setEditor(null)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>{editor==='new'?'我不去，帮我带饭':'修改我的带饭'}</DialogTitle><DialogDescription>{winner?.name} · {editor==='new'?'填写具体菜名，方便朋友下单。':'保存后保留这条登记，无需取消重填。'}</DialogDescription></DialogHeader>
-      <form onSubmit={async e=>{
+    <Dialog open={!!editor} onOpenChange={open=>!open&&!busy&&setEditor(null)}><DialogContent className="editor-dialog order-composer"><DialogHeader><DialogTitle>{editor==='new'?'我不去，帮我带饭':'修改我的带饭'}</DialogTitle><DialogDescription>{winner?.name} · {editor==='new'?'填写具体菜名，方便朋友下单。':'保存后保留这条登记，无需取消重填。'}</DialogDescription></DialogHeader>
+      <div className="order-composer-grid">{winner&&<aside className="composer-menu"><h3>对照菜单填写</h3><MenuBrowser key={editor==='new'?'new':editor?.id} restaurant={winner} roomId={room.id} initialMode={menuMode}/></aside>}<form onSubmit={async e=>{
         e.preventDefault();if(busyRef.current||finished||editChanged||(editor==='new'&&stopped))return;
         let payload:Record<string,unknown>;
         if(editor==='new'){
@@ -111,7 +121,7 @@ export function FoodOrders({ room, update }: { room: Room; update: (r: Room) => 
           try{sessionStorage.setItem(pendingKey,JSON.stringify(attempt));}catch{}
           payload={action:'order',...attempt};
         }else payload={action:'editOrder',orderId:editor?.id,expectedRevision:editor?.revision,dish,quantity:Number(quantity),note};
-        if(await act(payload)){if(editor==='new')clearOrderAttempt();setEditor(null);setFilter('mine');}
+        if(await act(payload)){if(editor==='new'){clearOrderAttempt();clearDraft();}setEditor(null);setFilter('mine');}
       }}>
         {editor==='new'&&<label className="field">你的群昵称（顶部可修改）<Input disabled={busy} readOnly={pendingOrder||!!room.preferred_nickname} required maxLength={24} value={pendingOrder?nickname:room.preferred_nickname||nickname} onChange={e=>setNickname(e.target.value)}/></label>}
         <label className="field">想吃什么<Input disabled={busy} readOnly={editor==='new'&&pendingOrder} required maxLength={100} value={dish} onChange={e=>setDish(e.target.value)} placeholder="例如：宫保鸡丁盒饭"/></label>
@@ -121,8 +131,8 @@ export function FoodOrders({ room, update }: { room: Room; update: (r: Room) => 
         {finished?<p className="error" role="alert">本轮已结束，不能保存。填写内容已保留，仍可复制。</p>:editChanged&&<p className="error" role="alert">登记已被修改、认领或取消，暂未覆盖你的填写内容。{currentEdit?.status==='pending'&&<Button type="button" variant="ghost" onClick={()=>openEditor(currentEdit)}>读取最新内容</Button>}</p>}
         {!finished&&editor==='new'&&stopped&&<p className="error" role="alert">本轮已停止加单，不能提交新登记。填写内容已保留，可复制后与带饭人联系。</p>}
         {error&&<p className="error" role="alert">{error}</p>}<Button className="primary full" disabled={busy||finished||editChanged||(editor==='new'&&stopped)}>{busy?<Loader2 className="spin"/>:<Check/>}{busy?'正在保存…':editor==='new'?pendingOrder?'重试，找回上次登记':'加入带饭清单':'保存修改'}</Button>
-        <p className="fine-print">未认领前可以修改。菜品是否有售、价格和付款请在群里确认。</p>
-      </form>
+        <p className="fine-print">关闭窗口会保留未提交的新登记草稿，可在同一浏览器继续填写。未认领前可以修改。</p>
+      </form></div>
     </DialogContent></Dialog>
     <Dialog open={!!claim&&!finished} onOpenChange={open=>!open&&!busy&&setClaim(null)}><DialogContent className="editor-dialog"><DialogHeader><DialogTitle>这份我来带</DialogTitle><DialogDescription>帮 {claim?.nickname} 带 {claim?.dish} × {claim?.quantity}。{claim?.note&&`备注：${claim.note}`}</DialogDescription></DialogHeader>
       {claimChanged?<div><p className="error" role="alert">这份登记已更新，请先查看最新菜名和备注。</p>{currentClaim?.status==='pending'&&<Button variant="outline" className="secondary full" onClick={()=>{setClaim(currentClaim);setError('');}}>查看最新登记</Button>}</div>:null}

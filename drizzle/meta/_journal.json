@@ -99,6 +99,13 @@
       "when": 1789273928492,
       "tag": "0013_oval_wither",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1789333508510,
+      "tag": "0014_mighty_vindicator",
+      "breakpoints": true
     }
   ]
 }
