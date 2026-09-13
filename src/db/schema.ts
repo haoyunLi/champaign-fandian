@@ -3,7 +3,7 @@ export const restaurants = sqliteTable('restaurants', {
   id: text('id').primaryKey(), owner: text('owner').notNull(), name: text('name').notNull(),
   cuisine: text('cuisine').notNull(), address: text('address').notNull().default(''),
   source: text('source').notNull().default(''), menuImages: text('menu_images').notNull().default('[]'), selected: integer('selected').notNull().default(1),
-  position: integer('position').notNull(), deleted: integer('deleted').notNull().default(0), mediaUpdatedAt: text('media_updated_at'),
+  revision: integer('revision').notNull().default(0), position: integer('position').notNull(), deleted: integer('deleted').notNull().default(0), mediaUpdatedAt: text('media_updated_at'),
 }, t => [index('idx_restaurants_owner').on(t.owner)]);
 export const rooms = sqliteTable('rooms', {
   id: text('id').primaryKey(), owner: text('owner').notNull(), title: text('title').notNull(),
@@ -69,3 +69,8 @@ export const notifications=sqliteTable('notifications',{
   id:integer('id').primaryKey({autoIncrement:true}),owner:text('owner').notNull(),roomId:text('room_id').notNull().references(()=>rooms.id),
   message:text('message').notNull(),createdAt:text('created_at').notNull(),readAt:text('read_at'),
 },t=>[index('idx_notifications_owner_id').on(t.owner,t.id)]);
+
+export const orderDrafts=sqliteTable('order_drafts',{
+  roomId:text('room_id').notNull().references(()=>rooms.id),owner:text('owner').notNull(),
+  payload:text('payload'),revision:integer('revision').notNull().default(0),updatedAt:text('updated_at').notNull(),
+},t=>[primaryKey({columns:[t.roomId,t.owner]})]);

@@ -19,6 +19,7 @@ beforeEach(()=>{
 });
 afterEach(()=>{db.sqlite.close();delete globalThis.__fandianTestDB;delete globalThis.__fandianTestBucket;});
 async function call(who,body,query=''){
+  if(body?.action==='saveRestaurant'&&body.id&&body.expectedRevision===undefined)body={...body,expectedRevision:(await call(who)).data.restaurants.find(r=>r.id===body.id)?.revision};
   const response=await(body?POST:GET)(new Request(`https://example.test/api/game${query}`,{method:body?'POST':'GET',headers:{Cookie:`fd_session=${who}`,Origin:'https://example.test','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})}));
   return {status:response.status,data:await response.json()};
 }

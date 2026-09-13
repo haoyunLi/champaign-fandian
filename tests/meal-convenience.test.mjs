@@ -12,6 +12,7 @@ beforeEach(()=>{db=createDatabase();globalThis.__fandianTestDB=db;});
 afterEach(()=>{db.sqlite.close();delete globalThis.__fandianTestDB;});
 const visitor=()=>randomBytes(32).toString('hex');
 async function call(who,body,query=''){
+  if(body?.action==='saveRestaurant'&&body.id&&body.expectedRevision===undefined)body={...body,expectedRevision:(await call(who)).data.restaurants.find(r=>r.id===body.id)?.revision};
   const response=await(body?POST:GET)(new Request(`https://example.test/api/game${query}`,{method:body?'POST':'GET',headers:{Cookie:`fd_session=${who}`,Origin:'https://example.test','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})}));
   return {status:response.status,data:await response.json()};
 }
@@ -38,7 +39,7 @@ test('legacy menu matching is conservative when restaurant records are ambiguous
   const who=visitor(),{catalog,room}=await create(who),c=room.candidates[0],r=catalog.restaurants.find(r=>r.id===c.restaurant_id);
   db.sqlite.prepare('UPDATE candidates SET restaurant_id=NULL WHERE id=?').run(c.id);
   assert.equal((await call(who,null,`?room=${room.id}&menu=${c.id}`)).data.restaurant.id,r.id);
-  await call(who,{...save(r),id:undefined});
+  await call(who,{...save(r),id:undefined,duplicateIds:[r.id]});
   const ambiguous=await call(who,null,`?room=${room.id}&menu=${c.id}`);assert.equal(ambiguous.status,200);assert.equal(ambiguous.data.restaurant,null);assert.match(ambiguous.data.message,/无法准确/);
 });
 test('personal pools are identity scoped, idempotent, revision checked and cannot be resurrected by retries',async()=>{

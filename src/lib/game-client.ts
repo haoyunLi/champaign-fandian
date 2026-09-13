@@ -3,11 +3,13 @@ let viewKey='';
 let restored=false;
 let hasResponse=false;
 let bootstrap:Promise<void>|undefined;
+export function gameIdentityKey(){return viewKey;}
 export function clearPendingMealDrafts() {
   let found=false;
   try {
     for(let i=sessionStorage.length-1;i>=0;i--){const key=sessionStorage.key(i);if(key?.startsWith('fd_pending_')){found=true;sessionStorage.removeItem(key);}}
   }catch{}
+  try{for(let i=localStorage.length-1;i>=0;i--){const key=localStorage.key(i);if(key?.startsWith('fd_order_journal_')){found=true;localStorage.removeItem(key);}}}catch{}
   return found;
 }
 export async function gameFetch(input:string,init?:RequestInit):Promise<Response> {

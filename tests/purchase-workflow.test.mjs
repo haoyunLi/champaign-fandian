@@ -12,6 +12,7 @@ beforeEach(()=>{db=createDatabase();globalThis.__fandianTestDB=db;});
 afterEach(()=>{db.sqlite.close();delete globalThis.__fandianTestDB;});
 const user=()=>randomBytes(32).toString('hex');
 async function call(who,body,query=''){
+  if(body?.action==='saveRestaurant'&&body.id&&body.expectedRevision===undefined)body={...body,expectedRevision:(await call(who)).data.restaurants.find(r=>r.id===body.id)?.revision};
   const response=await(body?POST:GET)(new Request('https://example.test/api/game'+query,{method:body?'POST':'GET',headers:{Cookie:`fd_session=${who}`,Origin:'https://example.test','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})}));return {status:response.status,data:await response.json()};
 }
 async function create(who,extra={}){const c=(await call(who)).data,body={action:'create',requestId:randomUUID(),title:'体验流程测试',mode:'manual',restaurantIds:c.restaurants.slice(0,2).map(r=>r.id),...extra};const r=await call(who,body);assert.equal(r.status,200,JSON.stringify(r.data));return {room:r.data,body};}
@@ -95,7 +96,7 @@ test('last dishes are owner scoped, restaurant scoped, latest first, and survive
   db.sqlite.prepare("UPDATE candidates SET restaurant_id=NULL WHERE room_id=?").run(room.id);
   const renamed={action:'saveRestaurant',id:r.id,name:r.name,cuisine:r.cuisine,address:r.address};await call(host,renamed);
   assert.deepEqual((await get(guest,replay)).recentDishes.map(r=>r.dish),['新菜','旧菜']);
-  await call(host,{...renamed,id:undefined});assert.deepEqual((await get(guest,replay)).recentDishes,[]);
+  await call(host,{...renamed,id:undefined,duplicateIds:[r.id]});assert.deepEqual((await get(guest,replay)).recentDishes,[]);
   const other=(await create(host,{restaurantIds:catalog.restaurants.slice(2,4).map(r=>r.id)})).room;await call(host,{action:'vote',room:other.id,nickname:'发起人',candidateId:other.candidates[0].id});await call(host,{action:'close',room:other.id});assert.deepEqual((await get(guest,other)).recentDishes,[]);
 });
 test('voting deadlines preserve idempotent create requests and reject invalid or expired first creation',async()=>{

@@ -1,3 +1,5 @@
+import { similarRestaurants } from '@/lib/restaurant-match';
+import { readDraft, writeDraft, DraftError } from '@/lib/order-draft-store';
 import { notifications } from '@/lib/meal-updates';
 import { OPEN_VOTING_SQL,settleVoting,votingDeadline } from '@/lib/voting-deadline';
 import { chatGPTSignInPath, chatGPTSignOutPath } from '@/app/chatgpt-auth';
@@ -10,7 +12,7 @@ import { ACTIVE_DELIVERY_SQL, finishMeal, mealLifecycle, settleMeals, type Lifec
 import type { Restaurant, Room, Vote, FoodOrder, HistoryRoom, HistoryPage, HomeMeal, VotingMode, Profile, Member, AccountSession, PickupPlan, RestaurantPool } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
-class UserError extends Error { constructor(message: string, public status = 400, public code?: string, public room?: Room) { super(message); } }
+class UserError extends Error { constructor(message: string, public status = 400, public code?: string, public room?: Room, public details?:Record<string,unknown>) { super(message); } }
 type RestaurantRow = Omit<Restaurant,'menu_images'> & {menu_images:string};
 type OrderSubmission = {nickname:string;dish:string;quantity:number;note:string};
 function orderSubmission(body: Record<string,unknown>): OrderSubmission {
@@ -89,7 +91,7 @@ async function catalog(db: D1Database, owner: string) {
     (SELECT COUNT(*) FROM orders WHERE room_id=r.id AND status='delivered') AS delivered_count`;
   const [,,restaurants,rooms,active,total,finished] = await db.batch([
     ...settleMeals(db,'owner=? OR id IN (SELECT room_id FROM room_history WHERE owner=?)',[owner,owner]),
-    db.prepare('SELECT id,name,cuisine,address,source,menu_images,media_updated_at,selected,position FROM restaurants WHERE owner=? AND deleted=0 ORDER BY position,id').bind('shared'),
+    db.prepare('SELECT id,name,cuisine,address,source,menu_images,media_updated_at,revision,selected,position FROM restaurants WHERE owner=? AND deleted=0 ORDER BY position,id').bind('shared'),
     db.prepare('SELECT id,title,status,mode,voting_deadline_at,created_at,decided_at,completed_at,completion_reason FROM rooms WHERE owner=? AND deleted_at IS NULL ORDER BY created_at DESC,id DESC LIMIT 8').bind(owner),
     db.prepare(`${summarySelect} ${activeFrom} ORDER BY r.created_at DESC,r.id DESC LIMIT 8`).bind(owner,owner,owner),
     db.prepare(`SELECT COUNT(*) AS count ${activeFrom}`).bind(owner,owner),
@@ -203,8 +205,8 @@ async function latestMenu(db:D1Database,room:Room,candidateId:string) {
   const candidate=room.candidates.find(c=>c.id===candidateId);
   if(!candidate) throw new UserError('这家餐馆不在本轮候选中。',404);
   let rows:RestaurantRow[];
-  if(candidate.restaurant_id) rows=(await db.prepare("SELECT id,name,cuisine,address,source,menu_images,media_updated_at,selected,position FROM restaurants WHERE id=? AND owner='shared' AND deleted=0").bind(candidate.restaurant_id).all<RestaurantRow>()).results;
-  else rows=(await db.prepare("SELECT id,name,cuisine,address,source,menu_images,media_updated_at,selected,position FROM restaurants WHERE owner='shared' AND deleted=0 AND name=? AND cuisine=? AND address=? LIMIT 2").bind(candidate.name,candidate.cuisine,candidate.address).all<RestaurantRow>()).results;
+  if(candidate.restaurant_id) rows=(await db.prepare("SELECT id,name,cuisine,address,source,menu_images,media_updated_at,revision,selected,position FROM restaurants WHERE id=? AND owner='shared' AND deleted=0").bind(candidate.restaurant_id).all<RestaurantRow>()).results;
+  else rows=(await db.prepare("SELECT id,name,cuisine,address,source,menu_images,media_updated_at,revision,selected,position FROM restaurants WHERE owner='shared' AND deleted=0 AND name=? AND cuisine=? AND address=? LIMIT 2").bind(candidate.name,candidate.cuisine,candidate.address).all<RestaurantRow>()).results;
   return rows.length===1?{restaurant:restaurantWithMedia(rows[0])}:{restaurant:null,message:candidate.restaurant_id?'这家餐馆已从餐馆库移除，本轮原菜单仍可查看。':'无法准确对应到当前餐馆，请到餐馆清单中查看最新菜单。本轮原菜单仍保留。'};
 }
 async function handle(request: Request) {
@@ -224,7 +226,7 @@ async function handle(request: Request) {
     let result: unknown;
     if (request.method === 'GET') {
       const room=url.searchParams.get('room');
-      result=url.searchParams.has('profile') ? await profile(db,owner) : room ? url.searchParams.has('menu') ? await latestMenu(db,await roomState(db,clean(room,64,'投票编号'),owner),clean(url.searchParams.get('menu'),80,'候选编号')) : await roomState(db,clean(room,64,'投票编号'),owner) : url.searchParams.has('history') ? await historyPage(db,owner,url) : await catalog(db,owner);
+      result=room&&url.searchParams.has('draft') ? await readDraft(db,clean(room,64,'投票编号'),owner) : url.searchParams.has('profile') ? await profile(db,owner) : room ? url.searchParams.has('menu') ? await latestMenu(db,await roomState(db,clean(room,64,'投票编号'),owner),clean(url.searchParams.get('menu'),80,'候选编号')) : await roomState(db,clean(room,64,'投票编号'),owner) : url.searchParams.has('history') ? await historyPage(db,owner,url) : await catalog(db,owner);
     } else {
       const expectedIdentity=request.headers.get('x-fandian-identity');
       if((expectedIdentity&&expectedIdentity!==viewKey)||(!expectedIdentity&&identityResult.account.signed_in))
@@ -234,7 +236,9 @@ async function handle(request: Request) {
       let body: Record<string,unknown>;
       try { body=JSON.parse(raw); } catch { throw new UserError('提交内容无效。'); }
       if (!body || typeof body!=='object' || Array.isArray(body)) throw new UserError('提交内容无效。');
-      if(body.action==='readUpdates'){
+      if(body.action==='saveOrderDraft'||body.action==='clearOrderDraft'){
+        result=await writeDraft(db,clean(body.room,64,'投票编号'),owner,body);
+      } else if(body.action==='readUpdates'){
         if(!Number.isSafeInteger(body.throughId)||Number(body.throughId)<1)throw new UserError('更新编号无效。');
         await db.prepare("UPDATE notifications SET read_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE owner=? AND id<=? AND read_at IS NULL").bind(owner,body.throughId).run();
         result={ok:true};
@@ -325,16 +329,22 @@ async function handle(request: Request) {
         await seed(db,'shared');
         const name=clean(body.name,60,'餐馆名称'), cuisine=clean(body.cuisine,40,'餐馆类型',false),address=clean(body.address,160,'地址',false);
         const id=body.id ? clean(body.id,80,'餐馆编号') : crypto.randomUUID();
-        const old=body.id ? await db.prepare("SELECT source,menu_images FROM restaurants WHERE id=? AND owner='shared' AND deleted=0").bind(id).first<{source:string;menu_images:string}>() : null;
+        const old=body.id ? await db.prepare("SELECT * FROM restaurants WHERE id=? AND owner='shared' AND deleted=0").bind(id).first<RestaurantRow>() : null;
         if(body.id && !old) throw new UserError('餐馆不存在。',404);
+        if(old&&(!Number.isInteger(body.expectedRevision)||old.revision!==body.expectedRevision))throw new UserError('餐馆已被更新，请核对最新资料后再保存。',409,'RESTAURANT_CHANGED',undefined,{restaurant:restaurantWithMedia(old)});
+        if(!old){
+          const list=(await db.prepare("SELECT * FROM restaurants WHERE owner='shared' AND deleted=0").all<RestaurantRow>()).results.map(restaurantWithMedia);
+          const matches=similarRestaurants(name,list);
+          if(matches.some(r=>!Array.isArray(body.duplicateIds)||!body.duplicateIds.includes(r.id)))throw new UserError('已有相似餐馆，请选择编辑已有餐馆，或确认添加另一家分店。',409,'RESTAURANT_DUPLICATE',undefined,{restaurants:matches});
+        }
         // Omitted fields from an older client must not erase menus or website links.
         const source=body.source===undefined ? old?.source || '' : restaurantWebsite(body.source);
         const images=body.menu_images===undefined ? old?.menu_images || '[]' : JSON.stringify(menuIds(body.menu_images));
         const validImages=`NOT EXISTS (SELECT 1 FROM json_each(?) j LEFT JOIN menu_images m ON m.id=j.value
           WHERE m.id IS NULL OR m.ready<>1 OR (m.published=0 AND m.owner<>?))`;
         const mutation=body.id
-          ? db.prepare(`UPDATE restaurants SET name=?,cuisine=?,address=?,media_updated_at=CASE WHEN source<>? OR menu_images<>? THEN ? ELSE media_updated_at END,source=?,menu_images=?
-              WHERE id=? AND owner='shared' AND deleted=0 AND ${validImages}`).bind(name,cuisine,address,source,images,new Date().toISOString(),source,images,id,images,owner)
+          ? db.prepare(`UPDATE restaurants SET name=?,cuisine=?,address=?,revision=revision+1,media_updated_at=CASE WHEN source<>? OR menu_images<>? THEN ? ELSE media_updated_at END,source=?,menu_images=?
+              WHERE id=? AND owner='shared' AND deleted=0 AND revision=? AND ${validImages}`).bind(name,cuisine,address,source,images,new Date().toISOString(),source,images,id,body.expectedRevision,images,owner)
           : db.prepare(`INSERT INTO restaurants (id,owner,name,cuisine,address,source,menu_images,media_updated_at,selected,position)
               SELECT ?,'shared',?,?,?,?,?,?,1,? WHERE (SELECT COUNT(*) FROM restaurants WHERE owner='shared' AND deleted=0)<100
               AND ${validImages}`).bind(id,name,cuisine,address,source,images,new Date().toISOString(),Date.now(),images,owner);
@@ -343,6 +353,7 @@ async function handle(request: Request) {
           db.prepare(`UPDATE menu_images SET published=1 WHERE id IN
             (SELECT value FROM json_each((SELECT menu_images FROM restaurants WHERE id=? AND owner='shared' AND deleted=0)))`).bind(id),
         ]);
+        if(!changed.meta.changes&&old){const latest=await db.prepare("SELECT * FROM restaurants WHERE id=? AND owner='shared' AND deleted=0").bind(id).first<RestaurantRow>();if(!latest||latest.revision!==body.expectedRevision)throw new UserError(latest?'餐馆已被更新，请核对最新资料后再保存。':'这家餐馆刚被删除。',409,'RESTAURANT_CHANGED',undefined,{restaurant:latest?restaurantWithMedia(latest):null});}
         if(!changed.meta.changes) throw new UserError('餐馆未保存：菜单图片已过期、尚未上传完成，或餐馆库已满。请重新选择图片或刷新列表后再试。',409);
         result=await catalog(db,owner);
       } else if (body.action==='deleteRestaurant' || body.action==='restoreRestaurant') {
@@ -351,9 +362,9 @@ async function handle(request: Request) {
         if(!existing) throw new UserError('餐馆不存在。',404);
         if(body.action==='deleteRestaurant') {
           // Keep the row as a tombstone: an empty catalog must not regenerate the initial seeds.
-          await db.prepare('UPDATE restaurants SET deleted=1 WHERE id=? AND owner=\'shared\'').bind(id).run();
+          await db.prepare('UPDATE restaurants SET deleted=1,revision=revision+1 WHERE id=? AND owner=\'shared\'').bind(id).run();
         } else {
-          const restored=await db.prepare('UPDATE restaurants SET deleted=0 WHERE id=? AND owner=\'shared\' AND (deleted=0 OR (SELECT COUNT(*) FROM restaurants WHERE owner=\'shared\' AND deleted=0)<100)').bind(id).run();
+          const restored=await db.prepare('UPDATE restaurants SET deleted=0,revision=revision+1 WHERE id=? AND owner=\'shared\' AND (deleted=0 OR (SELECT COUNT(*) FROM restaurants WHERE owner=\'shared\' AND deleted=0)<100)').bind(id).run();
           if(!restored.meta.changes) throw new UserError('餐馆库已满 100 家，请先删除一家再撤销。',409);
         }
         result=await catalog(db,owner);
@@ -593,12 +604,13 @@ async function handle(request: Request) {
     if(cookie) headers['Set-Cookie']=cookie;
     return Response.json(result,{headers});
   } catch(error) {
+    if(error instanceof DraftError) error=new UserError(error.message,error.status,error.code,undefined,{draftState:error.state});
     if(error instanceof MenuError) error=new UserError(error.message,error.status);
     if(error instanceof PayloadTooLargeError) error=new UserError('提交内容过长。',413);
     if(error instanceof UserError&&error.room){error.room.profile.account=account;error.room.profile.sign_in_path=authAvailable?chatGPTSignInPath(`/?room=${encodeURIComponent(error.room.id)}`):undefined;error.room.profile.sign_out_path=authAvailable?chatGPTSignOutPath(`/?room=${encodeURIComponent(error.room.id)}`):undefined;}
     if(!(error instanceof UserError)) console.error('Fandian request failed',error);
     const headers: Record<string,string>={'Cache-Control':'no-store'};if(viewKey)headers['X-Fandian-Identity']=viewKey; if(cookie) headers['Set-Cookie']=cookie;
-    return Response.json({error:error instanceof UserError ? error.message : '暂时连接不上，请稍后重试。你的填写内容仍然保留。',...(error instanceof UserError && error.code ? {code:error.code,room:error.room} : {})},{status:error instanceof UserError ? error.status : 503,headers});
+    return Response.json({error:error instanceof UserError ? error.message : '暂时连接不上，请稍后重试。你的填写内容仍然保留。',...(error instanceof UserError && error.code ? {code:error.code,room:error.room,...error.details} : {})},{status:error instanceof UserError ? error.status : 503,headers});
   }
 }
 export const GET=handle;
