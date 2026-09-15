@@ -56,6 +56,7 @@ function RoomView({ room, setRoom, home }: { room: Room; setRoom: (r: Room) => v
   const [share, setShare] = useState(false), [copied, setCopied] = useState(false), [confirm, setConfirm] = useState(false);
   const [displayNumber, setDisplayNumber] = useState('？');
   const [candidateId, setCandidateId] = useState('');
+  const [randomChoice,setRandomChoice]=useState(false);
   const [savingHistory, setSavingHistory] = useState(false);
   const [historyError, setHistoryError] = useState('');
   const foodRef=useRef<FoodOrdersHandle>(null);
@@ -73,6 +74,16 @@ function RoomView({ room, setRoom, home }: { room: Room; setRoom: (r: Room) => v
     const timer=setTimeout(()=>{void api<Room>(undefined,room.id).then(setRoom).catch(()=>setError('截止时间已到，正在等待连接恢复以读取结果。'));},Math.max(0,Math.min(Date.parse(room.voting_deadline_at)-Date.now()+50,2147483647)));
     return()=>clearTimeout(timer);
   },[room.id,room.status,room.voting_deadline_at,setRoom]);
+  function chooseRandom() {
+    if(busy||closed||room.myVote)return;
+    if(room.voting_deadline_at&&Date.parse(room.voting_deadline_at)<=Date.now()){setError('投票时间已到，请等待最终结果。');return;}
+    const choices=room.candidates.filter(candidate=>candidate.id!==candidateId);
+    if(!choices.length)return;
+    // This only chooses a radio option. The existing vote handler submits after confirmation.
+    const limit=Math.floor(4294967296/choices.length)*choices.length;
+    let number:number;do{number=crypto.getRandomValues(new Uint32Array(1))[0];}while(number>=limit);
+    setCandidateId(choices[number%choices.length].id);setRandomChoice(true);setError('');
+  }
   async function vote(e: React.FormEvent) {
     e.preventDefault(); if (busy) return;
     if(room.voting_deadline_at&&Date.parse(room.voting_deadline_at)<=Date.now()){setError('投票时间已到，请等待最终结果。');return;}
@@ -104,7 +115,7 @@ function RoomView({ room, setRoom, home }: { room: Room; setRoom: (r: Room) => v
     {closed && winner && <><section className="chosen-restaurant"><div className="chosen-heading"><Trophy/><span>本轮选定餐馆</span></div><div className="chosen-content"><div><h2>{winner?.name}</h2><p>{winner?.count} 票 · {tied>1?'平票后随机选定':'本轮票数最高'}{winner?.address&&` · ${winner.address}`}</p></div>{winner&&<RestaurantLinks restaurant={winner} roomId={room.id} prominent onOrder={phase==='delivery'&&!room.orders_stopped_at?mode=>foodRef.current?.openNew(mode):undefined}/>}</div></section><FoodOrders ref={foodRef} room={room} update={setRoom}/>{phase==='finished'&&<div className="room-replay"><span>下次还用这份候选名单？</span><ReplayButton roomId={room.id}/></div>}</>}
     {!closed && <div className="room-grid"><section className={`draw-panel ${closed ? 'winner-panel' : ''}`} aria-live="polite">
       {mine ? <><div className="draw-number">{manual ? <Check /> : String(mine.position).padStart(2, '0')}</div><p className="draw-label">{manual ? '你已投票给' : '你的随机号码，已自动投票给'}</p><h2>{mine.name}</h2><p className="voted"><Check size={18} />{room.myVote?.nickname}，这一票已计入</p><p className="muted">等大家投完后，任何人都可以结束投票、确定餐馆。</p></>
-      : manual ? <><div className="draw-number"><VoteIcon /></div><h2>今天你想吃哪家？</h2><p>选一家心仪的餐馆，给它投一票。</p><form id="room-vote-form" onSubmit={vote}><label className="field">你的群昵称<Input required maxLength={24} value={room.preferred_nickname||nickname} readOnly={!!room.preferred_nickname} onChange={e => setNickname(e.target.value)} placeholder="让朋友知道你来啦" disabled={busy} /></label><fieldset className="ballot-field" disabled={busy}><legend>选择一家餐馆</legend><div className="ballot-options">{room.candidates.map(candidate => <div key={candidate.id} className="ballot-candidate"><label className={`ballot-option ${candidateId === candidate.id ? 'chosen' : ''}`}><input type="radio" name="candidate" required value={candidate.id} checked={candidateId === candidate.id} onChange={() => setCandidateId(candidate.id)} /><span><strong>{candidate.name}</strong><small>{candidate.cuisine || '自定义餐馆'}{candidate.address && ` · ${candidate.address}`}</small></span></label><RestaurantLinks restaurant={candidate} roomId={room.id}/></div>)}</div></fieldset><Button className="primary full" disabled={busy || !candidateId}>{busy ? <Loader2 className="spin" /> : <VoteIcon />}{busy ? '正在投票…' : '确认投票'}</Button></form><p className="fine-print">每人一票，提交后不能更改。昵称可通过页面顶部的用户名按钮修改。</p></>
+      : manual ? <><div className="draw-number"><VoteIcon /></div><h2>今天你想吃哪家？</h2><p>自己选一家，或随机帮你拿个主意。</p><form id="room-vote-form" onSubmit={vote}><label className="field">你的群昵称<Input required maxLength={24} value={room.preferred_nickname||nickname} readOnly={!!room.preferred_nickname} onChange={e => setNickname(e.target.value)} placeholder="让朋友知道你来啦" disabled={busy} /></label><div className="ballot-random"><Button type="button" variant="outline" className="secondary full" disabled={busy||room.candidates.length<2} onClick={chooseRandom}><Dice5/>{randomChoice?'重新随机，换一家':'不知道选什么？随机帮我选'}</Button><p role="status" aria-live="polite">{randomChoice?<><strong>随机选中：{room.candidates.find(candidate=>candidate.id===candidateId)?.name}</strong><span>还未投票，可以继续随机或手动改选。</span></>:'随机只帮你选择，点击「确认投票」才计票。'}</p></div><fieldset className="ballot-field" disabled={busy}><legend>选择一家餐馆</legend><div className="ballot-options">{room.candidates.map(candidate => <div key={candidate.id} className="ballot-candidate"><label className={`ballot-option ${candidateId === candidate.id ? 'chosen' : ''}`}><input type="radio" name="candidate" required value={candidate.id} checked={candidateId === candidate.id} onChange={() => {setCandidateId(candidate.id);setRandomChoice(false);}} /><span><strong>{candidate.name}</strong><small>{candidate.cuisine || '自定义餐馆'}{candidate.address && ` · ${candidate.address}`}</small></span></label><RestaurantLinks restaurant={candidate} roomId={room.id}/></div>)}</div></fieldset><Button className="primary full" disabled={busy || !candidateId}>{busy ? <Loader2 className="spin" /> : <VoteIcon />}{busy ? '正在投票…' : '确认投票'}</Button></form><p className="fine-print">每人一票，提交后不能更改。昵称可通过页面顶部的用户名按钮修改。</p></>
       : <><div className={`draw-number ${busy ? 'drawing' : ''}`}>{busy ? displayNumber : <Dice5 />}</div><h2>轮到你的好运了</h2><p>抽到几号，就给几号餐馆投一票。</p><form id="room-vote-form" onSubmit={vote}><label className="field">你的群昵称<Input required maxLength={24} value={room.preferred_nickname||nickname} readOnly={!!room.preferred_nickname} onChange={e => setNickname(e.target.value)} placeholder="让朋友知道你来啦" disabled={busy} /></label><Button className="primary full" disabled={busy}>{busy ? <Loader2 className="spin" /> : <Dice5 />}{busy ? '正在抽签…' : '随机抽签并投票'}</Button></form><p className="fine-print">同一浏览器每轮限投一次，昵称可通过页面顶部的用户名按钮修改。</p></>}
       {error && <p className="error" role="alert">{error}</p>}
     </section>

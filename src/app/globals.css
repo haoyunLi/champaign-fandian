@@ -173,3 +173,5 @@
 .conflict-field button[aria-pressed=true]{outline:2px solid var(--primary);outline-offset:1px}
 .conflict-images{display:flex;gap:.5rem;overflow:auto;padding:.5rem 0}.conflict-images img{width:70px;height:90px;object-fit:contain}
 @media(max-width:600px){.order-controls>.primary{flex:1;min-height:44px}.restaurant-duplicates>div{align-items:flex-start;flex-direction:column}.restaurant-conflict,.restaurant-duplicates{padding:.8rem}}
+
+.ballot-random{margin:1rem 0;text-align:left}.ballot-random p{font-size:.875rem;margin:.6rem 0;line-height:1.6;overflow-wrap:anywhere}.ballot-random strong,.ballot-random span{display:block}.ballot-random strong{font-size:1rem}.ballot-random button{min-height:44px;white-space:normal;height:auto;padding:.7rem 1rem}
